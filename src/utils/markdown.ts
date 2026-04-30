@@ -1,26 +1,28 @@
 export function parseFrontmatter(text: string): { frontmatter: Record<string, string> | null; body: string } {
-  const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(text);
-  if (!m) return { frontmatter: null, body: text };
-  const fm: Record<string, string> = {};
-  for (const line of m[1].split(/\r?\n/)) {
-    const kv = /^([A-Za-z0-9_\-]+)\s*:\s*(.*)$/.exec(line);
-    if (kv) fm[kv[1]] = kv[2].trim();
+  const match = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(text);
+  if (!match) return { frontmatter: null, body: text };
+
+  const frontmatter: Record<string, string> = {};
+  for (const line of match[1].split(/\r?\n/)) {
+    const keyValue = /^([A-Za-z0-9_-]+)\s*:\s*(.*)$/.exec(line);
+    if (keyValue) frontmatter[keyValue[1]] = keyValue[2].trim();
   }
-  return { frontmatter: fm, body: text.slice(m[0].length) };
+
+  return { frontmatter, body: text.slice(match[0].length) };
 }
 
 export function extractWikilinks(text: string): string[] {
-  const out = new Set<string>();
-  for (const m of text.matchAll(/\[\[([^\]\n|#]+)(?:[#|][^\]\n]*)?\]\]/g)) {
-    out.add(m[1].trim());
+  const links = new Set<string>();
+  for (const match of text.matchAll(/\[\[([^\]\n|#]+)(?:[#|][^\]\n]*)?\]\]/g)) {
+    links.add(match[1].trim());
   }
-  return [...out];
+  return [...links];
 }
 
 export function extractTags(text: string): string[] {
-  const out = new Set<string>();
-  for (const m of text.matchAll(/(?:^|\s)(#[\w一-龥\/-]+)/g)) {
-    out.add(m[1]);
+  const tags = new Set<string>();
+  for (const match of text.matchAll(/(?:^|\s)(#[\w\u4e00-\u9fa5/-]+)/g)) {
+    tags.add(match[1]);
   }
-  return [...out];
+  return [...tags];
 }

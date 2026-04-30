@@ -24,7 +24,7 @@ export function keyError(key: string): string | null {
 }
 
 export function assertTextKey(key: string): string | null {
-  return keyError(key) ?? (isTextFile(key) ? null : `仅允许文本扩展名 (${TEXT_EXTS.join(", ")})，收到: ${key}`);
+  return keyError(key) ?? (isTextFile(key) ? null : `仅允许文本扩展名 (${TEXT_EXTS.join(", ")})，收到 ${key}`);
 }
 
 function timestampSlug(date = new Date()): string {

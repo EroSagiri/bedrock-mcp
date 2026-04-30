@@ -16,14 +16,26 @@
 	],
 	"durable_objects": {
 		"bindings": [
-			{ "name": "MCP_OBJECT", "class_name": "BedrockMCP" }
+			{
+				"name": "MCP_OBJECT",
+				"class_name": "BedrockMCP"
+			}
 		]
 	},
 	"migrations": [
-		{ "tag": "v1", "new_sqlite_classes": ["BedrockMCP"] }
+		{
+			"tag": "v1",
+			"new_sqlite_classes": [
+				"BedrockMCP"
+			]
+		}
 	],
 	"r2_buckets": [
-		{ "binding": "BEDROCK", "bucket_name": "bedrock" }
+		{
+			"binding": "BEDROCK",
+			"bucket_name": "bedrock",
+			"remote": true
+		}
 	]
 	/**
 	 * Smart Placement

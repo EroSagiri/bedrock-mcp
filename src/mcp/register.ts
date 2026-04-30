@@ -1,4 +1,5 @@
 import { registerBedrockResources } from "./resources";
+import { registerBedrockPrompts } from "./prompts";
 import { registerDocumentTools } from "./tools/documents";
 import { registerFileTools } from "./tools/files";
 import { registerGraphTools } from "./tools/graph";
@@ -15,4 +16,5 @@ export async function registerBedrockMcp(ctx: McpRegistrationContext): Promise<v
   registerLinkTools(ctx);
   registerGraphTools(ctx);
   registerBedrockResources(ctx);
+  registerBedrockPrompts(ctx);
 }
