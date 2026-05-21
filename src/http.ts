@@ -1,5 +1,7 @@
 import type { Env } from "./types";
 import { ensureUtf8ContentType, guessContentType } from "./storage/content";
+import { isAuthenticated, unauthorized } from "./auth/session";
+import { handleApi } from "./api/web";
 
 type ServeMcp = {
   fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response>;
@@ -7,7 +9,7 @@ type ServeMcp = {
 
 export const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Mcp-Session-Id, Authorization",
   "Access-Control-Expose-Headers": "Mcp-Session-Id",
   "Access-Control-Max-Age": "86400",
@@ -25,6 +27,8 @@ export function withCors(res: Response): Response {
 }
 
 export async function serveStatic(req: Request, env: Env, pathname: string): Promise<Response> {
+  if (!await isAuthenticated(req, env)) return unauthorized();
+
   let key: string;
   try {
     key = decodeURIComponent(pathname.slice("/static/".length));
@@ -35,7 +39,7 @@ export async function serveStatic(req: Request, env: Env, pathname: string): Pro
     return new Response("Bad static path", { status: 400 });
   }
 
-  const obj = await env.BEDROCK.get(key);
+  const obj = await env.BEDROCK.get(key) ?? (key.startsWith("bedrock/") ? await env.BEDROCK.get(key.slice("bedrock/".length)) : null);
   if (!obj?.body) return new Response("Not found", { status: 404 });
 
   const headers = new Headers();
@@ -54,6 +58,12 @@ export async function handleFetch(req: Request, env: Env, ctx: ExecutionContext,
     return new Response(null, { status: 204, headers: CORS_HEADERS });
   }
   const url = new URL(req.url);
+  if (url.pathname === "/") {
+    return Response.redirect(`${url.origin}/app`, 302);
+  }
+  if (url.pathname.startsWith("/api/")) {
+    return withCors(await handleApi(req, env));
+  }
   if (url.pathname === "/mcp") {
     const res = await mcp.fetch(req, env, ctx);
     return withCors(res);
@@ -61,5 +71,8 @@ export async function handleFetch(req: Request, env: Env, ctx: ExecutionContext,
   if ((req.method === "GET" || req.method === "HEAD") && url.pathname.startsWith("/static/")) {
     return withCors(await serveStatic(req, env, url.pathname));
   }
-  return withCors(new Response("OK"));
+  if (req.method === "GET" || req.method === "HEAD") {
+    return env.ASSETS.fetch(req);
+  }
+  return withCors(new Response("Not found", { status: 404 }));
 }

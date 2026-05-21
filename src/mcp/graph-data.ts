@@ -69,3 +69,29 @@ export async function buildGraph(bucket: R2Bucket, options: GraphOptions = {}) {
     edges,
   };
 }
+
+export async function buildNeighborGraph(bucket: R2Bucket, key: string, depth = 1, options: GraphOptions = {}) {
+  const graph = await buildGraph(bucket, options);
+  const selectedDepth = Math.max(1, Math.min(depth, 3));
+  const selected = new Set<string>([key]);
+
+  for (let level = 0; level < selectedDepth; level++) {
+    const frontier = new Set(selected);
+    for (const edge of graph.edges) {
+      if (frontier.has(edge.from) && edge.to) selected.add(edge.to);
+      if (edge.to && frontier.has(edge.to)) selected.add(edge.from);
+    }
+  }
+
+  const nodes = graph.nodes.filter(node => selected.has(node.key));
+  const edges = graph.edges.filter(edge => selected.has(edge.from) && (!edge.to || selected.has(edge.to)));
+  return {
+    key,
+    depth: selectedDepth,
+    nodeCount: nodes.length,
+    edgeCount: edges.length,
+    danglingCount: edges.filter(edge => edge.dangling).length,
+    nodes,
+    edges,
+  };
+}

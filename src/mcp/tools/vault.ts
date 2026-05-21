@@ -13,7 +13,7 @@ export function registerVaultTools(ctx: McpRegistrationContext): void {
     registerToolCompat(ctx.server,
       "vault_list_documents",
       {
-        prefix: z.string().optional().describe("路径前缀过滤，例如 '日记/' 只列日记目录"),
+        prefix: z.string().optional().describe("路径前缀过滤，例如 'daily/' 只列日记目录"),
         cursor: z.string().optional(),
         limit: z.number().int().min(1).max(1000).optional(),
       },

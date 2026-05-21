@@ -16,15 +16,15 @@ export function err(text: string) {
 }
 
 export function keyError(key: string): string | null {
-  if (!key.trim()) return "key 不能为空";
-  if (key.includes("..")) return "key 不能包含 '..'";
-  if (key.startsWith("/") || key.endsWith("/")) return "key 不能以 / 开头或结尾";
-  if (key.includes("//")) return "key 不能包含连续的 //";
+  if (!key.trim()) return "key cannot be empty";
+  if (key.includes("..")) return "key cannot contain '..'";
+  if (key.startsWith("/") || key.endsWith("/")) return "key cannot start or end with /";
+  if (key.includes("//")) return "key cannot contain consecutive //";
   return null;
 }
 
 export function assertTextKey(key: string): string | null {
-  return keyError(key) ?? (isTextFile(key) ? null : `仅允许文本扩展名 (${TEXT_EXTS.join(", ")})，收到 ${key}`);
+  return keyError(key) ?? (isTextFile(key) ? null : `Only text extensions are allowed (${TEXT_EXTS.join(", ")}), got ${key}`);
 }
 
 function timestampSlug(date = new Date()): string {

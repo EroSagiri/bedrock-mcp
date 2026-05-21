@@ -46,7 +46,7 @@ export function registerBedrockPrompts(ctx: McpRegistrationContext): void {
       argsSchema: {
         startDate: z.string().min(1).describe("开始日期，例如 2026-04-20"),
         endDate: z.string().min(1).describe("结束日期，例如 2026-04-26"),
-        prefix: z.string().optional().describe("可选目录前缀，例如 日记/"),
+        prefix: z.string().optional().describe("可选目录前缀，例如 daily/"),
       },
     },
     ({ startDate, endDate, prefix }) => prompt(

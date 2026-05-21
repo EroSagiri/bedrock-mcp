@@ -1,101 +1,111 @@
-import { applyPatch, createPatch } from "diff";
 import { z } from "zod";
 import { registerToolCompat } from "../compat";
-import { TEXT_EXTS, encodeUtf8, guessContentType, isTextFile, textContentTypeForKey } from "../../storage/content";
-import { backlinkTargets, scanTextFiles } from "../../storage/r2";
-import { extractTags, extractWikilinks, parseFrontmatter } from "../../utils/markdown";
-import { buildMatcher, snippet, snippetAt } from "../../utils/search";
+import { buildGraph, buildNeighborGraph } from "../graph-data";
+import { scanTextFiles } from "../../storage/r2";
+import { extractTags, extractWikilinks } from "../../utils/markdown";
 import { relativeTime } from "../../utils/time";
-import { assertTextKey, backupTextObject, err, keyError, moveObject, ok, stripTextExt, trashKey, wikilinkReplacement, type McpRegistrationContext } from "../shared";
-import { buildGraph } from "../graph-data";
+import { ok, stripTextExt, type McpRegistrationContext } from "../shared";
 
 export function registerGraphTools(ctx: McpRegistrationContext): void {
+  registerToolCompat(
+    ctx.server,
+    "graph_get",
+    {
+      prefix: z.string().optional().describe("Limit scanned notes by prefix"),
+      includeDangling: z.boolean().optional().describe("Include unresolved outgoing links, default true"),
+      limit: z.number().int().min(1).max(2000).optional().describe("Maximum scanned text notes, default 500"),
+    },
+    async ({ prefix, includeDangling, limit }) => ok(JSON.stringify(
+      await buildGraph(ctx.env.BEDROCK, { prefix, includeDangling, limit }),
+      null,
+      2
+    ))
+  );
 
-    // 输出 wikilink 图谱：nodes + edges，可用于可视化或健康检查
-    registerToolCompat(ctx.server,
-      "graph_get",
-      {
-        prefix: z.string().optional().describe("限定目录"),
-        includeDangling: z.boolean().optional().describe("是否包含指向不存在文件的边，默认 true"),
-        limit: z.number().int().min(1).max(2000).optional().describe("最多扫描多少篇文本笔记，默认 500"),
-      },
-      async ({ prefix, includeDangling, limit }) => {
-        return ok(JSON.stringify(
-          await buildGraph(ctx.env.BEDROCK, { prefix, includeDangling, limit }),
-          null,
-          2
-        ));
+  registerToolCompat(
+    ctx.server,
+    "graph_neighbors",
+    {
+      key: z.string().min(1).describe("Note key to center the graph on"),
+      depth: z.number().int().min(1).max(3).optional().describe("Neighborhood depth, default 1"),
+      prefix: z.string().optional().describe("Limit scanned notes by prefix"),
+      includeDangling: z.boolean().optional().describe("Include unresolved outgoing links, default true"),
+      limit: z.number().int().min(1).max(2000).optional().describe("Maximum scanned text notes, default 500"),
+    },
+    async ({ key, depth, prefix, includeDangling, limit }) => ok(JSON.stringify(
+      await buildNeighborGraph(ctx.env.BEDROCK, key, depth ?? 1, { prefix, includeDangling, limit }),
+      null,
+      2
+    ))
+  );
+
+  registerToolCompat(
+    ctx.server,
+    "graph_find_orphans",
+    {
+      prefix: z.string().optional().describe("Limit scanned notes by prefix"),
+      mode: z.enum(["isolated", "noIncoming", "noOutgoing"]).optional().describe("Default isolated"),
+      limit: z.number().int().min(1).max(1000).optional(),
+    },
+    async ({ prefix, mode, limit }) => {
+      const files = await scanTextFiles(ctx.env.BEDROCK, prefix, (key, text, obj) => {
+        if (key.startsWith(".history/") || key.startsWith(".trash/")) return null;
+        return {
+          key,
+          modified: obj.uploaded.toISOString(),
+          modifiedRelative: relativeTime(obj.uploaded),
+          links: extractWikilinks(text),
+          tags: extractTags(text),
+          size: obj.size,
+        };
+      }, { max: limit ?? 1000 });
+
+      const targetIndex = new Map<string, string>();
+      for (const file of files) {
+        const noExt = stripTextExt(file.key);
+        const basename = noExt.split("/").pop() ?? noExt;
+        targetIndex.set(file.key, file.key);
+        targetIndex.set(noExt, file.key);
+        targetIndex.set(basename, file.key);
       }
-    );
 
-
-    // 找孤立笔记：没有入链/没有出链/完全孤立
-    registerToolCompat(ctx.server,
-      "graph_find_orphans",
-      {
-        prefix: z.string().optional().describe("限定目录"),
-        mode: z.enum(["isolated", "noIncoming", "noOutgoing"]).optional().describe("默认 isolated"),
-        limit: z.number().int().min(1).max(1000).optional(),
-      },
-      async ({ prefix, mode, limit }) => {
-        const files = await scanTextFiles(ctx.env.BEDROCK, prefix, (key, text, obj) => {
-          if (key.startsWith(".history/") || key.startsWith(".trash/")) return null;
-          return {
-            key,
-            modified: obj.uploaded.toISOString(),
-            modifiedRelative: relativeTime(obj.uploaded),
-            links: extractWikilinks(text),
-            tags: extractTags(text),
-            size: obj.size,
-          };
-        }, { max: limit ?? 1000 });
-
-        const targetIndex = new Map<string, string>();
-        for (const file of files) {
-          const noExt = stripTextExt(file.key);
-          const basename = noExt.split("/").pop() ?? noExt;
-          targetIndex.set(file.key, file.key);
-          targetIndex.set(noExt, file.key);
-          targetIndex.set(basename, file.key);
-        }
-
-        const degrees = new Map<string, { in: number; out: number; dangling: number }>();
-        for (const file of files) degrees.set(file.key, { in: 0, out: 0, dangling: 0 });
-        for (const file of files) {
-          const deg = degrees.get(file.key)!;
-          for (const link of file.links) {
-            deg.out++;
-            const resolved = targetIndex.get(link) ?? targetIndex.get(stripTextExt(link)) ?? null;
-            if (resolved) {
-              const targetDeg = degrees.get(resolved);
-              if (targetDeg) targetDeg.in++;
-            } else {
-              deg.dangling++;
-            }
+      const degrees = new Map<string, { in: number; out: number; dangling: number }>();
+      for (const file of files) degrees.set(file.key, { in: 0, out: 0, dangling: 0 });
+      for (const file of files) {
+        const deg = degrees.get(file.key)!;
+        for (const link of file.links) {
+          deg.out++;
+          const resolved = targetIndex.get(link) ?? targetIndex.get(stripTextExt(link)) ?? null;
+          if (resolved) {
+            const targetDeg = degrees.get(resolved);
+            if (targetDeg) targetDeg.in++;
+          } else {
+            deg.dangling++;
           }
         }
-
-        const selectedMode = mode ?? "isolated";
-        const items = files
-          .map(file => ({ ...file, ...(degrees.get(file.key) ?? { in: 0, out: 0, dangling: 0 }) }))
-          .filter(file => {
-            if (selectedMode === "noIncoming") return file.in === 0;
-            if (selectedMode === "noOutgoing") return file.out === 0;
-            return file.in === 0 && file.out === 0;
-          })
-          .sort((a, b) => b.modified.localeCompare(a.modified))
-          .map(file => ({
-            key: file.key,
-            modified: file.modified,
-            modifiedRelative: file.modifiedRelative,
-            size: file.size,
-            tags: file.tags,
-            inDegree: file.in,
-            outDegree: file.out,
-            danglingLinks: file.dangling,
-          }));
-
-        return ok(JSON.stringify({ mode: selectedMode, count: items.length, items }, null, 2));
       }
-    );
+
+      const selectedMode = mode ?? "isolated";
+      const items = files
+        .map(file => ({ ...file, ...(degrees.get(file.key) ?? { in: 0, out: 0, dangling: 0 }) }))
+        .filter(file => {
+          if (selectedMode === "noIncoming") return file.in === 0;
+          if (selectedMode === "noOutgoing") return file.out === 0;
+          return file.in === 0 && file.out === 0;
+        })
+        .sort((a, b) => b.modified.localeCompare(a.modified))
+        .map(file => ({
+          key: file.key,
+          modified: file.modified,
+          modifiedRelative: file.modifiedRelative,
+          size: file.size,
+          tags: file.tags,
+          inDegree: file.in,
+          outDegree: file.out,
+          danglingLinks: file.dangling,
+        }));
+
+      return ok(JSON.stringify({ mode: selectedMode, count: items.length, items }, null, 2));
+    }
+  );
 }

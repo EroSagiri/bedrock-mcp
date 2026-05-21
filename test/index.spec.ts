@@ -12,18 +12,23 @@ import worker from "../src/index";
 const IncomingRequest = Request<unknown, IncomingRequestCfProperties>;
 
 describe("Bedrock MCP worker", () => {
-	it("responds with OK (unit style)", async () => {
+	it("redirects the root path to the web app (unit style)", async () => {
 		const request = new IncomingRequest("http://example.com");
-		// Create an empty context to pass to `worker.fetch()`.
 		const ctx = createExecutionContext();
 		const response = await worker.fetch(request, env, ctx);
-		// Wait for all `Promise`s passed to `ctx.waitUntil()` to settle before running test assertions
 		await waitOnExecutionContext(ctx);
-		expect(await response.text()).toMatchInlineSnapshot(`"OK"`);
+		expect(response.status).toBe(302);
+		expect(response.headers.get("Location")).toBe("http://example.com/app");
 	});
 
-	it("responds with OK (integration style)", async () => {
-		const response = await SELF.fetch("https://example.com");
-		expect(await response.text()).toMatchInlineSnapshot(`"OK"`);
+	it("serves the React app shell (integration style)", async () => {
+		const response = await SELF.fetch("https://example.com/app");
+		expect(response.headers.get("Content-Type")).toContain("text/html");
+		expect(await response.text()).toContain("Bedrock Vault");
+	});
+
+	it("requires authentication for web APIs", async () => {
+		const response = await SELF.fetch("https://example.com/api/documents");
+		expect(response.status).toBe(401);
 	});
 });

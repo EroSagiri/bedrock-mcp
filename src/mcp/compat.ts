@@ -174,6 +174,12 @@ const TOOL_METADATA: Record<string, {
     title: "Get link graph",
     description: "Build a wikilink graph with nodes, edges, and dangling-link status.",
   },
+  graph_neighbors: {
+    category: "graph",
+    risk: "read",
+    title: "Get note neighborhood",
+    description: "Build a local wikilink graph around one note.",
+  },
   graph_find_orphans: {
     category: "graph",
     risk: "read",

@@ -3,6 +3,7 @@ import { isTextFile } from "../storage/content";
 import { scanTextFiles } from "../storage/r2";
 import { extractTags } from "../utils/markdown";
 import { relativeTime } from "../utils/time";
+import { buildDailyNoteCandidates, getDailyNotesDir } from "../utils/daily";
 import { registerResourceCompat } from "./compat";
 import { buildGraph } from "./graph-data";
 import { type McpRegistrationContext } from "./shared";
@@ -247,15 +248,10 @@ export function registerBedrockResources(ctx: McpRegistrationContext): void {
     ctx.server,
     "res_doc_today",
     "bedrock://today",
-    { description: "今天的日记，按常见 日记/YYYY-MM-DD.md 路径查找。", mimeType: "text/markdown" },
+    { description: "今天的日记，按配置的 daily 目录查找。", mimeType: "text/markdown" },
     async uri => {
       const today = new Date().toISOString().slice(0, 10);
-      const candidates = [
-        `日记/${today}.md`,
-        `日记/${today.replace(/-/g, "")}.md`,
-        `日记/${today.slice(0, 7)}/${today}.md`,
-        `日记/${today.slice(0, 4)}/${today}.md`,
-      ];
+      const candidates = buildDailyNoteCandidates(today, getDailyNotesDir(ctx.env));
       for (const key of candidates) {
         const obj = await ctx.env.BEDROCK.get(key);
         if (obj) {
@@ -279,7 +275,7 @@ export function registerBedrockResources(ctx: McpRegistrationContext): void {
     "res_doc_daily",
     new ResourceTemplate("bedrock://daily/{date}", {
       list: async () => ({
-        resources: (await listTextObjects(ctx.env.BEDROCK, "日记/"))
+        resources: (await listTextObjects(ctx.env.BEDROCK, `${getDailyNotesDir(ctx.env)}/`))
           .map(object => ({ object, date: dateFromKey(object.key) }))
           .filter((item): item is { object: R2Object; date: string } => item.date !== null)
           .map(({ object, date }) => ({
@@ -296,12 +292,7 @@ export function registerBedrockResources(ctx: McpRegistrationContext): void {
     { description: "按日期读取日记。", mimeType: "text/markdown" },
     async (uri, { date }) => {
       const d = decodeVar(date);
-      const candidates = [
-        `日记/${d}.md`,
-        `日记/${d.replace(/-/g, "")}.md`,
-        `日记/${d.slice(0, 7)}/${d}.md`,
-        `日记/${d.slice(0, 4)}/${d}.md`,
-      ];
+      const candidates = buildDailyNoteCandidates(d, getDailyNotesDir(ctx.env));
       for (const key of candidates) {
         const obj = await ctx.env.BEDROCK.get(key);
         if (obj) {

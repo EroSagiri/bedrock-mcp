@@ -20,7 +20,7 @@ export function registerSearchTools(ctx: McpRegistrationContext): void {
         searchIn: z.array(z.enum(["content", "filename", "path", "tags", "frontmatter"]))
           .optional()
           .describe("搜索范围。默认 ['content','filename']。content=正文，filename=文件名（含扩展），path=完整路径，tags=#标签，frontmatter=YAML 字段值"),
-        prefix: z.string().optional().describe("限定目录，例如 '日记/'"),
+        prefix: z.string().optional().describe("限定目录，例如 'daily/'"),
         limit: z.number().int().min(1).max(200).optional(),
         contextChars: z.number().int().min(20).max(500).optional().describe("片段前后字符数，默认 60"),
       },

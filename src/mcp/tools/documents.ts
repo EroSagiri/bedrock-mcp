@@ -6,6 +6,7 @@ import { backlinkTargets, scanTextFiles } from "../../storage/r2";
 import { extractTags, extractWikilinks, parseFrontmatter } from "../../utils/markdown";
 import { buildMatcher, snippet, snippetAt } from "../../utils/search";
 import { relativeTime } from "../../utils/time";
+import { buildDailyNoteCandidates, getDailyNotesDir } from "../../utils/daily";
 import { assertTextKey, backupTextObject, err, keyError, moveObject, ok, stripTextExt, trashKey, wikilinkReplacement, type McpRegistrationContext } from "../shared";
 
 export function registerDocumentTools(ctx: McpRegistrationContext): void {
@@ -41,18 +42,13 @@ export function registerDocumentTools(ctx: McpRegistrationContext): void {
       "doc_daily",
       {
         date: z.string().optional().describe("YYYY-MM-DD，默认今天"),
-        folder: z.string().optional().describe("日记目录，默认 '日记'"),
+        folder: z.string().optional().describe("日记目录，默认 DAILY_NOTES_DIR 或 daily"),
       },
       async ({ date, folder }) => {
-        const dir = folder ?? "日记";
+        const configuredDir = getDailyNotesDir(ctx.env, folder);
         const today = date ?? new Date().toISOString().slice(0, 10);
         // 尝试常见命名
-        const candidates = [
-          `${dir}/${today}.md`,
-          `${dir}/${today.replace(/-/g, "")}.md`,
-          `${dir}/${today.slice(0, 7)}/${today}.md`,
-          `${dir}/${today.slice(0, 4)}/${today}.md`,
-        ];
+        const candidates = buildDailyNoteCandidates(today, configuredDir);
         for (const k of candidates) {
           const obj = await ctx.env.BEDROCK.get(k);
           if (obj) {
@@ -64,7 +60,7 @@ export function registerDocumentTools(ctx: McpRegistrationContext): void {
           }
         }
         // 没找到精确匹配就模糊匹配该目录下含日期的文件
-        const r = await ctx.env.BEDROCK.list({ prefix: `${dir}/`, limit: 1000 });
+        const r = await ctx.env.BEDROCK.list({ prefix: `${configuredDir}/`, limit: 1000 });
         const fuzzy = r.objects.filter(o => o.key.includes(today));
         return err(`未找到 ${today} 的日记。尝试过：\n${candidates.join("\n")}\n\n该目录下含 "${today}" 的文件：\n${fuzzy.map(o => o.key).join("\n") || "(无)"}`);
       }
@@ -75,7 +71,7 @@ export function registerDocumentTools(ctx: McpRegistrationContext): void {
     registerToolCompat(ctx.server,
       "doc_write",
       {
-        key: z.string().min(1).describe("R2 对象 key，例如 '日记/2026-04-29.md'"),
+        key: z.string().min(1).describe("R2 对象 key，例如 'daily/2026-04-29.md'"),
         content: z.string().describe("文件全文内容（覆盖式写入）"),
         contentType: z.string().optional().describe("MIME 类型，.md 默认 text/markdown"),
       },
@@ -281,7 +277,7 @@ export function registerDocumentTools(ctx: McpRegistrationContext): void {
       "doc_create_from_template",
       {
         template: z.string().min(1).describe("模板文件 key，例如 '模板/日记.md'"),
-        target: z.string().min(1).describe("目标 key，例如 '日记/2026-04-29.md'"),
+        target: z.string().min(1).describe("目标 key，例如 'daily/2026-04-29.md'"),
         vars: z.record(z.string(), z.string()).optional().describe("替换变量；自动包含 date/time/datetime/title"),
         overwrite: z.boolean().optional().describe("目标存在时是否覆盖，默认 false"),
       },
