@@ -2,7 +2,6 @@ import type { Env } from "./types";
 import { ensureUtf8ContentType, guessContentType } from "./storage/content";
 import { isAuthenticated, unauthorized } from "./auth/session";
 import { readBearerToken, verifyStaticAccessToken } from "./auth/static-token";
-import { handleApi } from "./api/web";
 
 type ServeMcp = {
   fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response>;
@@ -63,21 +62,12 @@ export async function handleFetch(req: Request, env: Env, ctx: ExecutionContext,
     return new Response(null, { status: 204, headers: CORS_HEADERS });
   }
   const url = new URL(req.url);
-  if (url.pathname === "/") {
-    return Response.redirect(`${url.origin}/app`, 302);
-  }
-  if (url.pathname.startsWith("/api/")) {
-    return withCors(await handleApi(req, env));
-  }
   if (url.pathname === "/mcp") {
     const res = await mcp.fetch(req, env, ctx);
     return withCors(res);
   }
   if ((req.method === "GET" || req.method === "HEAD") && url.pathname.startsWith("/static/")) {
     return withCors(await serveStatic(req, env, url.pathname));
-  }
-  if (req.method === "GET" || req.method === "HEAD") {
-    return env.ASSETS.fetch(req);
   }
   return withCors(new Response("Not found", { status: 404 }));
 }
