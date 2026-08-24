@@ -1,6 +1,7 @@
 import type { Env } from "./types";
 import { ensureUtf8ContentType, guessContentType } from "./storage/content";
 import { isAuthenticated, unauthorized } from "./auth/session";
+import { readBearerToken, verifyStaticAccessToken } from "./auth/static-token";
 import { handleApi } from "./api/web";
 
 type ServeMcp = {
@@ -27,8 +28,6 @@ export function withCors(res: Response): Response {
 }
 
 export async function serveStatic(req: Request, env: Env, pathname: string): Promise<Response> {
-  if (!await isAuthenticated(req, env)) return unauthorized();
-
   let key: string;
   try {
     key = decodeURIComponent(pathname.slice("/static/".length));
@@ -38,6 +37,12 @@ export async function serveStatic(req: Request, env: Env, pathname: string): Pro
   if (!key || key.includes("..")) {
     return new Response("Bad static path", { status: 400 });
   }
+
+  const bearer = readBearerToken(req);
+  const bearerAuthorized = bearer && env.STATIC_ACCESS_SECRET
+    ? await verifyStaticAccessToken(bearer, env.STATIC_ACCESS_SECRET, key)
+    : false;
+  if (!bearerAuthorized && !await isAuthenticated(req, env)) return unauthorized();
 
   const obj = await env.BEDROCK.get(key) ?? (key.startsWith("bedrock/") ? await env.BEDROCK.get(key.slice("bedrock/".length)) : null);
   if (!obj?.body) return new Response("Not found", { status: 404 });

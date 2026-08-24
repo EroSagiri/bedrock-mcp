@@ -4,6 +4,9 @@ import {
   buildDailyNoteCandidates,
   buildDailyNoteKey,
   getDailyNotesDir,
+  parseDailyDate,
+  renderFixedDailyNote,
+  shiftDailyDate,
   normalizeDailyNotesDir,
 } from "../src/utils/daily";
 
@@ -30,5 +33,26 @@ describe("daily note path helpers", () => {
       "daily/2026-05/2026-05-22.md",
       "daily/2026/2026-05-22.md",
     ]);
+  });
+
+  it("validates and shifts calendar dates", () => {
+    expect(parseDailyDate("2026-02-29")).toBeNull();
+    expect(shiftDailyDate("2024-02-29", 1)).toBe("2024-03-01");
+    expect(shiftDailyDate("2026-01-01", -1)).toBe("2025-12-31");
+  });
+
+  it("renders the fixed daily note format", () => {
+    expect(renderFixedDailyNote("2026-07-18", "今天完成了接口。\n")).toBe([
+      "---",
+      "tags: [日记]",
+      "date: 2026-07-18",
+      "---",
+      "",
+      "今天完成了接口。",
+      "",
+      "---",
+      "<< [[2026-07-17]] | [[2026-07-19]] >>",
+      "",
+    ].join("\n"));
   });
 });

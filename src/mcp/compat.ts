@@ -42,6 +42,12 @@ const TOOL_METADATA: Record<string, {
     title: "Read daily note",
     description: "Find and read a daily note by date.",
   },
+  doc_create_daily: {
+    category: "documents",
+    risk: "write",
+    title: "Create daily note",
+    description: "Create a daily note using the vault's fixed frontmatter and date-navigation format.",
+  },
   doc_write: {
     category: "documents",
     risk: "destructive",
@@ -119,6 +125,12 @@ const TOOL_METADATA: Record<string, {
     risk: "read",
     title: "Get public file URL",
     description: "Build a public static URL and markdown embed for a stored file.",
+  },
+  file_create_access_token: {
+    category: "files",
+    risk: "read",
+    title: "Create static access token",
+    description: "Create a short-lived Bearer token for reading static files under a path prefix.",
   },
   file_create_folder: {
     category: "files",

@@ -6,7 +6,7 @@ import { backlinkTargets, scanTextFiles } from "../../storage/r2";
 import { extractTags, extractWikilinks, parseFrontmatter } from "../../utils/markdown";
 import { buildMatcher, snippet, snippetAt } from "../../utils/search";
 import { relativeTime } from "../../utils/time";
-import { buildDailyNoteCandidates, getDailyNotesDir } from "../../utils/daily";
+import { buildDailyNoteCandidates, buildDailyNoteKey, getDailyNotesDir, parseDailyDate, renderFixedDailyNote } from "../../utils/daily";
 import { assertTextKey, backupTextObject, err, keyError, moveObject, ok, stripTextExt, trashKey, wikilinkReplacement, type McpRegistrationContext } from "../shared";
 
 export function registerDocumentTools(ctx: McpRegistrationContext): void {
@@ -63,6 +63,39 @@ export function registerDocumentTools(ctx: McpRegistrationContext): void {
         const r = await ctx.env.BEDROCK.list({ prefix: `${configuredDir}/`, limit: 1000 });
         const fuzzy = r.objects.filter(o => o.key.includes(today));
         return err(`未找到 ${today} 的日记。尝试过：\n${candidates.join("\n")}\n\n该目录下含 "${today}" 的文件：\n${fuzzy.map(o => o.key).join("\n") || "(无)"}`);
+      }
+    );
+
+    // 用固定格式创建日记，避免 Agent 自行猜测 frontmatter 和日期导航
+    registerToolCompat(ctx.server,
+      "doc_create_daily",
+      {
+        content: z.string().describe("日记正文，不包含 frontmatter 和底部日期导航"),
+        date: z.string().optional().describe("YYYY-MM-DD，默认今天"),
+      },
+      async ({ content, date }) => {
+        const targetDate = date ?? new Date().toISOString().slice(0, 10);
+        if (!parseDailyDate(targetDate)) {
+          return err(`无效日期：${targetDate}，必须是有效的 YYYY-MM-DD`);
+        }
+        const key = buildDailyNoteKey(targetDate, getDailyNotesDir(ctx.env));
+        if (await ctx.env.BEDROCK.head(key)) {
+          return err(`日记已存在，不会覆盖：${key}`);
+        }
+        const rendered = renderFixedDailyNote(targetDate, content);
+        if (!rendered) return err(`无法生成日记：${targetDate}`);
+        const contentType = textContentTypeForKey(key);
+        await ctx.env.BEDROCK.put(key, encodeUtf8(rendered), {
+          httpMetadata: { contentType },
+        });
+        return ok(JSON.stringify({
+          ok: true,
+          key,
+          date: targetDate,
+          action: "created",
+          size: encodeUtf8(rendered).length,
+          contentType,
+        }, null, 2));
       }
     );
 

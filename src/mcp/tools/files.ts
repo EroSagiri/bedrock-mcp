@@ -7,8 +7,42 @@ import { extractTags, extractWikilinks, parseFrontmatter } from "../../utils/mar
 import { buildMatcher, snippet, snippetAt } from "../../utils/search";
 import { relativeTime } from "../../utils/time";
 import { assertTextKey, backupTextObject, err, keyError, moveObject, ok, stripTextExt, trashKey, wikilinkReplacement, type McpRegistrationContext } from "../shared";
+import { createStaticAccessToken, normalizeStaticPrefix } from "../../auth/static-token";
 
 export function registerFileTools(ctx: McpRegistrationContext): void {
+
+    // 给 Agent 签发短期静态资源读取凭证
+    registerToolCompat(ctx.server,
+      "file_create_access_token",
+      {
+        prefix: z.string().optional().describe("允许访问的路径前缀，例如 '附件/'；默认允许普通静态资源"),
+        expiresIn: z.number().int().min(30).max(3600).optional().describe("有效秒数，默认 600，最长 3600"),
+      },
+      async ({ prefix, expiresIn }) => {
+        if (!ctx.env.STATIC_ACCESS_SECRET) {
+          return err("STATIC_ACCESS_SECRET is not configured");
+        }
+        const normalizedPrefix = normalizeStaticPrefix(prefix);
+        if (normalizedPrefix === null) return err("Invalid or protected prefix");
+        const issued = await createStaticAccessToken(
+          ctx.env.STATIC_ACCESS_SECRET,
+          normalizedPrefix,
+          expiresIn ?? 600
+        );
+        const baseUrl = ctx.env.PUBLIC_BASE_URL?.replace(/\/+$/, "") ?? null;
+        return ok(JSON.stringify({
+          token: issued.token,
+          tokenType: "Bearer",
+          authorization: `Bearer ${issued.token}`,
+          expiresAt: new Date(issued.expiresAt * 1000).toISOString(),
+          expiresIn: expiresIn ?? 600,
+          prefix: normalizedPrefix,
+          methods: ["GET", "HEAD"],
+          baseUrl: baseUrl ? `${baseUrl}/static/` : null,
+          usage: "Send the token in the Authorization header when requesting /static/<key>.",
+        }, null, 2));
+      }
+    );
 
     // 删除文档：默认软删除到 .trash；permanent=true 才硬删除
     registerToolCompat(ctx.server,
