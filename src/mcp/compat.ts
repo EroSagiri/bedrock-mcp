@@ -36,18 +36,6 @@ const TOOL_METADATA: Record<string, {
     title: "Read document",
     description: "Read one text document and optionally parse frontmatter, tags, and wikilinks.",
   },
-  doc_daily: {
-    category: "documents",
-    risk: "read",
-    title: "Read daily note",
-    description: "Find and read a daily note by date.",
-  },
-  doc_create_daily: {
-    category: "documents",
-    risk: "write",
-    title: "Create daily note",
-    description: "Create a daily note using the vault's fixed frontmatter and date-navigation format.",
-  },
   doc_write: {
     category: "documents",
     risk: "destructive",
