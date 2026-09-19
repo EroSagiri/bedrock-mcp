@@ -78,12 +78,6 @@ const TOOL_METADATA: Record<string, {
     title: "Append to document",
     description: "Append content to a text document, optionally creating it first.",
   },
-  doc_create_from_template: {
-    category: "documents",
-    risk: "write",
-    title: "Create document from template",
-    description: "Render a text template with variables into a target document.",
-  },
   doc_read_multiple: {
     category: "documents",
     risk: "read",

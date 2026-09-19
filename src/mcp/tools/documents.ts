@@ -240,52 +240,6 @@ export function registerDocumentTools(ctx: McpRegistrationContext): void {
       }
     );
 
-
-    // 按模板创建文件（替换 {{var}} 占位符）
-    registerToolCompat(ctx.server,
-      "doc_create_from_template",
-      {
-        template: z.string().min(1).describe("模板文件 key，例如 '模板/日记.md'"),
-        target: z.string().min(1).describe("目标 key，例如 'daily/2026-04-29.md'"),
-        vars: z.record(z.string(), z.string()).optional().describe("替换变量；自动包含 date/time/datetime/title"),
-        overwrite: z.boolean().optional().describe("目标存在时是否覆盖，默认 false"),
-      },
-      async ({ template, target, vars, overwrite }) => {
-        const tpl = await ctx.env.BEDROCK.get(template);
-        if (!tpl) return err(`模板不存在：${template}`);
-        if (!overwrite) {
-          const existed = await ctx.env.BEDROCK.head(target);
-          if (existed) return err(`目标已存在，传 overwrite: true 强制覆盖：${target}`);
-        }
-        const tplText = await tpl.text();
-        const now = new Date();
-        const pad = (n: number) => String(n).padStart(2, "0");
-        const titleFromTarget = (target.split("/").pop() ?? "").replace(/\.[^.]+$/, "");
-        const builtins: Record<string, string> = {
-          date: `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`,
-          time: `${pad(now.getHours())}:${pad(now.getMinutes())}`,
-          datetime: now.toISOString(),
-          title: titleFromTarget,
-          ...(vars ?? {}),
-        };
-        // 替换 {{key}} 和 {{ key }}
-        const rendered = tplText.replace(/\{\{\s*([\w-]+)\s*\}\}/g, (_, k) =>
-          builtins[k] !== undefined ? builtins[k] : `{{${k}}}`
-        );
-        const ct = textContentTypeForKey(target);
-        await ctx.env.BEDROCK.put(target, encodeUtf8(rendered), { httpMetadata: { contentType: ct } });
-        const unresolved = [...rendered.matchAll(/\{\{([\w-]+)\}\}/g)].map(m => m[1]);
-        return ok(JSON.stringify({
-          ok: true,
-          template,
-          target,
-          appliedVars: builtins,
-          unresolvedVars: [...new Set(unresolved)],
-        }, null, 2));
-      }
-    );
-
-
     // 批量读取（一次拿多个文件的全文，省 round-trip）
     registerToolCompat(ctx.server,
       "doc_read_multiple",
