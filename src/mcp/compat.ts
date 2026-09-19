@@ -206,6 +206,12 @@ const TOOL_METADATA: Record<string, {
     title: "Get vault stats",
     description: "Summarize file counts, sizes, folders, and activity.",
   },
+  vault_index_refresh: {
+    category: "vault",
+    risk: "write",
+    title: "Refresh vault metadata index",
+    description: "Start or resume a rebuild of the eventual-consistency Vault Metadata Index.",
+  },
 };
 
 function annotationsFor(risk: ToolRisk, title: string): ToolAnnotations {

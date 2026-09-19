@@ -6,10 +6,19 @@ import { backlinkTargets, scanTextFiles } from "../../storage/r2";
 import { extractTags, extractWikilinks, parseFrontmatter } from "../../utils/markdown";
 import { buildMatcher, snippet, snippetAt } from "../../utils/search";
 import { relativeTime } from "../../utils/time";
-import { indexQuery, readModeSchemaDescription } from "../index-client";
+import { indexQuery, readModeSchemaDescription, refreshIndex } from "../index-client";
 import { assertTextKey, backupTextObject, err, keyError, moveObject, ok, stripTextExt, trashKey, wikilinkReplacement, type McpRegistrationContext } from "../shared";
 
 export function registerVaultTools(ctx: McpRegistrationContext): void {
+    registerToolCompat(ctx.server,
+      "vault_index_refresh",
+      {
+        inputSchema: {},
+        annotations: { idempotentHint: true },
+      },
+      async () => ok(JSON.stringify(await refreshIndex(ctx.env), null, 2))
+    );
+
     // 列出文档（按修改时间倒序）
     registerToolCompat(ctx.server,
       "vault_list_documents",

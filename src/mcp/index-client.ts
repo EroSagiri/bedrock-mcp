@@ -10,6 +10,14 @@ export async function indexQuery(env: Env, kind: string, input: Record<string, u
   return await response.json<Record<string, unknown>>();
 }
 
+/** Starts a new metadata generation, or reports the one already building. */
+export async function refreshIndex(env: Env): Promise<Record<string, unknown>> {
+  const stub = env.VAULT_INDEX.get(env.VAULT_INDEX.idFromName("vault"));
+  const response = await stub.fetch("https://vault-index/refresh", { method: "POST", body: "{}" });
+  if (!response.ok) throw new Error(`VaultIndex refresh failed: ${response.status}`);
+  return await response.json<Record<string, unknown>>();
+}
+
 export function liveMeta<T extends Record<string, unknown>>(value: T): T & { freshness: "live"; source: "live" } {
   return { ...value, freshness: "live", source: "live" };
 }
