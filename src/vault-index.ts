@@ -2,14 +2,14 @@ import { isTextFile } from "./storage/content";
 import { extractTags, extractWikilinks, frontmatterTags, parseFrontmatter } from "./utils/markdown";
 import { DurableObject } from "cloudflare:workers";
 
-type Env = { BEDROCK: R2Bucket };
+type Env = { MINERAL: R2Bucket };
 type Row = Record<string, unknown>;
 const SYSTEM = [".history/", ".trash/", ".system/"];
 const isIndexable = (key: string) => isTextFile(key) && !SYSTEM.some(prefix => key.startsWith(prefix));
 const rows = (result: Iterable<Row>) => [...result];
 
 /**
- * The single, named instance is a rebuildable projection of BEDROCK.  It never
+ * The single, named instance is a rebuildable projection of MINERAL.  It never
  * stores document bodies; only metadata extracted while reading changed objects.
  */
 export class VaultIndex extends DurableObject<Env> {
@@ -83,13 +83,13 @@ export class VaultIndex extends DurableObject<Env> {
     if (!building) return;
     const cursor = this.getMeta("refresh_cursor") || undefined;
     const active = this.active();
-    const page = await this.env.BEDROCK.list({ cursor, limit: 100 });
+    const page = await this.env.MINERAL.list({ cursor, limit: 100 });
     for (const object of page.objects.filter(object => isIndexable(object.key))) {
       this.ctx.storage.sql.exec("INSERT OR IGNORE INTO refresh_seen VALUES (?, ?)", building, object.key);
       const previous = rows(this.ctx.storage.sql.exec("SELECT etag FROM documents WHERE generation = ? AND key = ?", active, object.key))[0];
       if (previous?.etag === object.etag) this.copyUnchanged(active, building, object.key);
       else {
-        const current = await this.env.BEDROCK.get(object.key);
+        const current = await this.env.MINERAL.get(object.key);
         if (current) this.indexDocument(building, object, await current.text());
       }
     }

@@ -4,7 +4,7 @@
  */
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
-	"name": "bedrock-mcp",
+	"name": "mineral-mcp",
 	"main": "src/index.ts",
 	"compatibility_date": "2026-04-28",
 	"observability": {
@@ -18,7 +18,7 @@
 		"bindings": [
 			{
 				"name": "MCP_OBJECT",
-				"class_name": "BedrockMCP"
+				"class_name": "MineralMCP"
 			},
 			{
 				"name": "VAULT_INDEX",
@@ -30,7 +30,7 @@
 		{
 			"tag": "v1",
 			"new_sqlite_classes": [
-				"BedrockMCP"
+				"MineralMCP"
 			]
 		}
 		,
@@ -42,9 +42,8 @@
 	"triggers": { "crons": ["0 */2 * * *"] },
 	"r2_buckets": [
 		{
-			"binding": "BEDROCK",
-			"bucket_name": "bedrock",
-			"remote": true
+			"binding": "MINERAL",
+			"bucket_name": "mineral"
 		}
 	]
 	/**

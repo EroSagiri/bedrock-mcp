@@ -27,9 +27,9 @@ export function registerLinkTools(ctx: McpRegistrationContext): void {
         const toInvalid = assertTextKey(to);
         if (toInvalid) return err(toInvalid);
         if (from === to) return err("from 和 to 相同");
-        const src = await ctx.env.BEDROCK.get(from);
+        const src = await ctx.env.MINERAL.get(from);
         if (!src) return err(`源文件不存在：${from}`);
-        const existingTarget = await ctx.env.BEDROCK.head(to);
+        const existingTarget = await ctx.env.MINERAL.head(to);
         if (existingTarget && !overwrite) return err(`目标已存在，传 overwrite: true 强制覆盖：${to}`);
         const srcText = await src.text();
 
@@ -37,7 +37,7 @@ export function registerLinkTools(ctx: McpRegistrationContext): void {
         const replacement = stripTextExt(to);
         const linkUpdates = updateLinks === false
           ? []
-          : await scanTextFiles(ctx.env.BEDROCK, undefined, (key, text, obj) => {
+          : await scanTextFiles(ctx.env.MINERAL, undefined, (key, text, obj) => {
               if (key === from || key === to || key.startsWith(".history/") || key.startsWith(".trash/")) return null;
               const replaced = wikilinkReplacement(text, targets, replacement);
               if (!replaced.changed) return null;
@@ -62,35 +62,35 @@ export function registerLinkTools(ctx: McpRegistrationContext): void {
           }, null, 2));
         }
 
-        const movedBackupKey = await backupTextObject(ctx.env.BEDROCK, from, srcText, src.httpMetadata?.contentType);
+        const movedBackupKey = await backupTextObject(ctx.env.MINERAL, from, srcText, src.httpMetadata?.contentType);
         let overwrittenTargetBackupKey: string | null = null;
         if (existingTarget) {
-          const targetObj = await ctx.env.BEDROCK.get(to);
+          const targetObj = await ctx.env.MINERAL.get(to);
           if (targetObj) {
             overwrittenTargetBackupKey = await backupTextObject(
-              ctx.env.BEDROCK,
+              ctx.env.MINERAL,
               to,
               await targetObj.text(),
               targetObj.httpMetadata?.contentType
             );
           }
         }
-        await ctx.env.BEDROCK.put(to, encodeUtf8(srcText), {
+        await ctx.env.MINERAL.put(to, encodeUtf8(srcText), {
           httpMetadata: { contentType: textContentTypeForKey(to, src.httpMetadata?.contentType) },
           customMetadata: src.customMetadata,
         });
-        await ctx.env.BEDROCK.delete(from);
+        await ctx.env.MINERAL.delete(from);
 
         const updated: Array<{ key: string; backupKey: string; size: number }> = [];
         for (const item of linkUpdates) {
-          const current = await ctx.env.BEDROCK.get(item.key);
+          const current = await ctx.env.MINERAL.get(item.key);
           if (!current) continue;
           const oldText = await current.text();
           const replaced = wikilinkReplacement(oldText, targets, replacement);
           if (!replaced.changed) continue;
-          const backupKey = await backupTextObject(ctx.env.BEDROCK, item.key, oldText, current.httpMetadata?.contentType);
+          const backupKey = await backupTextObject(ctx.env.MINERAL, item.key, oldText, current.httpMetadata?.contentType);
           const ct = textContentTypeForKey(item.key, current.httpMetadata?.contentType);
-          await ctx.env.BEDROCK.put(item.key, encodeUtf8(replaced.text), { httpMetadata: { contentType: ct } });
+          await ctx.env.MINERAL.put(item.key, encodeUtf8(replaced.text), { httpMetadata: { contentType: ct } });
           updated.push({ key: item.key, backupKey, size: encodeUtf8(replaced.text).length });
         }
 
@@ -119,7 +119,7 @@ export function registerLinkTools(ctx: McpRegistrationContext): void {
       async ({ key, limit, readMode }) => {
         if ((readMode ?? "index") === "index") return ok(JSON.stringify(await indexQuery(ctx.env, "backlinks", { key, limit }), null, 2));
         const targets = backlinkTargets(key);
-        const matches = await scanTextFiles(ctx.env.BEDROCK, undefined, (k, text, o) => {
+        const matches = await scanTextFiles(ctx.env.MINERAL, undefined, (k, text, o) => {
           if (k === key) return null; // 不返回自身
           const links = extractWikilinks(text);
           const hit = links.find(l => targets.has(l) || targets.has(l.split("/").pop() ?? ""));
@@ -144,7 +144,7 @@ export function registerLinkTools(ctx: McpRegistrationContext): void {
       { key: z.string().min(1), readMode: z.enum(["index", "live"]).optional().describe(readModeSchemaDescription) },
       async ({ key, readMode }) => {
         if ((readMode ?? "index") === "index") return ok(JSON.stringify(await indexQuery(ctx.env, "outgoing", { key }), null, 2));
-        const obj = await ctx.env.BEDROCK.get(key);
+        const obj = await ctx.env.MINERAL.get(key);
         if (!obj) return err(`Not found: ${key}`);
         const text = await obj.text();
         const links = extractWikilinks(text);
@@ -156,7 +156,7 @@ export function registerLinkTools(ctx: McpRegistrationContext): void {
             l, // 已经带扩展名的情况
           ];
           for (const c of candidates) {
-            const h = await ctx.env.BEDROCK.head(c);
+            const h = await ctx.env.MINERAL.head(c);
             if (h) return { link: l, resolved: c };
           }
           return { link: l, resolved: null };

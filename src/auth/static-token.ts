@@ -1,4 +1,4 @@
-const TOKEN_AUDIENCE = "bedrock-static";
+const TOKEN_AUDIENCE = "mineral-static";
 const MAX_TTL_SECONDS = 60 * 60;
 
 type StaticTokenPayload = {

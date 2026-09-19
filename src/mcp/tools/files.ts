@@ -55,7 +55,7 @@ export function registerFileTools(ctx: McpRegistrationContext): void {
       async ({ key, permanent, dryRun }) => {
         const invalid = keyError(key);
         if (invalid) return err(invalid);
-        const existed = await ctx.env.BEDROCK.head(key);
+        const existed = await ctx.env.MINERAL.head(key);
         if (!existed) return err(`Not found: ${key}`);
         if (dryRun) {
           return ok(JSON.stringify({
@@ -68,10 +68,10 @@ export function registerFileTools(ctx: McpRegistrationContext): void {
         }
         if (!permanent) {
           const target = trashKey(key);
-          await moveObject(ctx.env.BEDROCK, key, target);
+          await moveObject(ctx.env.MINERAL, key, target);
           return ok(JSON.stringify({ ok: true, key, action: "trashed", trashKey: target }, null, 2));
         }
-        await ctx.env.BEDROCK.delete(key);
+        await ctx.env.MINERAL.delete(key);
         return ok(JSON.stringify({ ok: true, key, action: "deleted", permanent: true }, null, 2));
       }
     );
@@ -98,12 +98,12 @@ export function registerFileTools(ctx: McpRegistrationContext): void {
         if (dryRun) return ok(JSON.stringify({ ok: true, dryRun: true, count: keys.length, plan }, null, 2));
         if (!permanent) {
           for (const item of plan) {
-            const existed = await ctx.env.BEDROCK.head(item.key);
-            if (existed && item.trashKey) await moveObject(ctx.env.BEDROCK, item.key, item.trashKey);
+            const existed = await ctx.env.MINERAL.head(item.key);
+            if (existed && item.trashKey) await moveObject(ctx.env.MINERAL, item.key, item.trashKey);
           }
           return ok(JSON.stringify({ ok: true, action: "trashed", count: keys.length, items: plan }, null, 2));
         }
-        await ctx.env.BEDROCK.delete(keys);
+        await ctx.env.MINERAL.delete(keys);
         return ok(JSON.stringify({ ok: true, action: "deleted", permanent: true, deleted: keys.length, keys }, null, 2));
       }
     );
@@ -133,7 +133,7 @@ export function registerFileTools(ctx: McpRegistrationContext): void {
           return err(`文件过大 (${bytes.byteLength} bytes)，上限 ${MAX}。大文件请直接 PUT /static/<key> 或 POST /upload`);
         }
         const ct = contentType ?? guessContentType(key);
-        await ctx.env.BEDROCK.put(key, bytes, { httpMetadata: { contentType: ct } });
+        await ctx.env.MINERAL.put(key, bytes, { httpMetadata: { contentType: ct } });
         return ok(JSON.stringify({
           ok: true,
           key,
@@ -153,13 +153,13 @@ export function registerFileTools(ctx: McpRegistrationContext): void {
         key: z.string().min(1),
       },
       async ({ key }) => {
-        const obj = await ctx.env.BEDROCK.head(key);
+        const obj = await ctx.env.MINERAL.head(key);
         if (!obj) return err(`Not found: ${key}`);
         return ok(JSON.stringify({
           key,
           publicPath: `/static/${key}`,
           markdown: `![${key.split("/").pop()}](/static/${encodeURI(key)})`,
-          note: "完整 URL 需要拼上 worker 域名，例如 https://bedrock-mcp.<account>.workers.dev/static/<key>。本地 dev 是 http://127.0.0.1:8787/static/<key>。",
+          note: "完整 URL 需要拼上 worker 域名，例如 https://mineral-mcp.<account>.workers.dev/static/<key>。本地 dev 是 http://127.0.0.1:8787/static/<key>。",
           contentType: obj.httpMetadata?.contentType ?? null,
           size: obj.size,
         }, null, 2));
@@ -176,9 +176,9 @@ export function registerFileTools(ctx: McpRegistrationContext): void {
       async ({ path }) => {
         const folder = path.replace(/\/+$/, "");
         const placeholder = `${folder}/.keep`;
-        const existed = await ctx.env.BEDROCK.head(placeholder);
+        const existed = await ctx.env.MINERAL.head(placeholder);
         if (existed) return ok(JSON.stringify({ ok: true, folder, action: "exists" }, null, 2));
-        await ctx.env.BEDROCK.put(placeholder, encodeUtf8(""), {
+        await ctx.env.MINERAL.put(placeholder, encodeUtf8(""), {
           httpMetadata: { contentType: "text/plain; charset=utf-8" },
         });
         return ok(JSON.stringify({
@@ -205,17 +205,17 @@ export function registerFileTools(ctx: McpRegistrationContext): void {
         const toInvalid = keyError(to);
         if (toInvalid) return err(toInvalid);
         if (from === to) return err("from 和 to 相同");
-        const src = await ctx.env.BEDROCK.get(from);
+        const src = await ctx.env.MINERAL.get(from);
         if (!src) return err(`源文件不存在：${from}`);
         if (!overwrite) {
-          const dst = await ctx.env.BEDROCK.head(to);
+          const dst = await ctx.env.MINERAL.head(to);
           if (dst) return err(`目标已存在，传 overwrite: true 强制覆盖：${to}`);
         }
-        await ctx.env.BEDROCK.put(to, src.body, {
+        await ctx.env.MINERAL.put(to, src.body, {
           httpMetadata: src.httpMetadata,
           customMetadata: src.customMetadata,
         });
-        await ctx.env.BEDROCK.delete(from);
+        await ctx.env.MINERAL.delete(from);
         return ok(JSON.stringify({ ok: true, from, to }, null, 2));
       }
     );

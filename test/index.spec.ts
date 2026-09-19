@@ -8,7 +8,7 @@ const mcp = {
 	fetch: async () => new Response("unused"),
 };
 
-describe("Bedrock MCP worker", () => {
+describe("Mineral MCP worker", () => {
 	it("does not expose the removed web console", async () => {
 		const response = await handleFetch(new Request("http://example.com"), env, ctx, mcp);
 		expect(response.status).toBe(404);

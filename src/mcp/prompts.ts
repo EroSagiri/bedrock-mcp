@@ -11,7 +11,7 @@ function prompt(text: string, description: string) {
   };
 }
 
-export function registerBedrockPrompts(ctx: McpRegistrationContext): void {
+export function registerMineralPrompts(ctx: McpRegistrationContext): void {
   ctx.server.registerPrompt(
     "prompt_note_organize",
     {
@@ -46,7 +46,7 @@ export function registerBedrockPrompts(ctx: McpRegistrationContext): void {
       argsSchema: {
         startDate: z.string().min(1).describe("开始日期，例如 2026-04-20"),
         endDate: z.string().min(1).describe("结束日期，例如 2026-04-26"),
-        prefix: z.string().optional().describe("可选目录前缀，例如 daily/"),
+        prefix: z.string().optional().describe("可选目录前缀，例如 reports/"),
       },
     },
     ({ startDate, endDate, prefix }) => prompt(
@@ -55,7 +55,7 @@ export function registerBedrockPrompts(ctx: McpRegistrationContext): void {
         prefix ? `优先搜索目录：${prefix}` : "如无目录限制，请跨整个 vault 搜索。",
         "",
         "工作流：",
-        "1. 使用 vault_recent、search_text 或 res_doc_daily 找到日期范围内的候选笔记。",
+        "1. 使用 vault_recent 或 search_text 找到日期范围内的候选笔记。",
         "2. 使用 doc_read_multiple 或 doc_read 读取关键笔记。",
         "3. 汇总完成事项、进行中事项、风险阻塞、重要决策和下周计划。",
         "4. 不要写入文件，除非用户明确要求保存。",

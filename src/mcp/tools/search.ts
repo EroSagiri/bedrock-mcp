@@ -48,7 +48,7 @@ export function registerSearchTools(ctx: McpRegistrationContext): void {
 
         let cursor: string | undefined;
         scan: do {
-          const r = await ctx.env.BEDROCK.list({ prefix, cursor, limit: 1000 });
+          const r = await ctx.env.MINERAL.list({ prefix, cursor, limit: 1000 });
           // filename/path 可以匹配所有文件；content/tags/frontmatter 只查文本文件
           const candidates = needsContent
             ? r.objects.filter(o => isTextFile(o.key))
@@ -69,7 +69,7 @@ export function registerSearchTools(ctx: McpRegistrationContext): void {
               }
 
               if (needsContent && isTextFile(o.key)) {
-                const obj = await ctx.env.BEDROCK.get(o.key);
+                const obj = await ctx.env.MINERAL.get(o.key);
                 if (obj) {
                   const text = await obj.text();
 
@@ -138,7 +138,7 @@ export function registerSearchTools(ctx: McpRegistrationContext): void {
       },
       async ({ field, value, contains, prefix, limit, readMode }) => {
         if ((readMode ?? "index") === "index") return ok(JSON.stringify(await indexQuery(ctx.env, "frontmatter", { field, value, contains, prefix, limit }), null, 2));
-        const matches = await scanTextFiles(ctx.env.BEDROCK, prefix, (k, text, o) => {
+        const matches = await scanTextFiles(ctx.env.MINERAL, prefix, (k, text, o) => {
           const { frontmatter } = parseFrontmatter(text);
           if (!frontmatter || !(field in frontmatter)) return null;
           const v = frontmatter[field];

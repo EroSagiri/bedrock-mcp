@@ -1,6 +1,5 @@
 import type { Env } from "./types";
 import { ensureUtf8ContentType, guessContentType } from "./storage/content";
-import { isAuthenticated, unauthorized } from "./auth/session";
 import { readBearerToken, verifyStaticAccessToken } from "./auth/static-token";
 
 type ServeMcp = {
@@ -41,9 +40,9 @@ export async function serveStatic(req: Request, env: Env, pathname: string): Pro
   const bearerAuthorized = bearer && env.STATIC_ACCESS_SECRET
     ? await verifyStaticAccessToken(bearer, env.STATIC_ACCESS_SECRET, key)
     : false;
-  if (!bearerAuthorized && !await isAuthenticated(req, env)) return unauthorized();
+  if (!bearerAuthorized) return Response.json({ error: "Unauthorized" }, { status: 401 });
 
-  const obj = await env.BEDROCK.get(key) ?? (key.startsWith("bedrock/") ? await env.BEDROCK.get(key.slice("bedrock/".length)) : null);
+  const obj = await env.MINERAL.get(key) ?? (key.startsWith("mineral/") ? await env.MINERAL.get(key.slice("mineral/".length)) : null);
   if (!obj?.body) return new Response("Not found", { status: 404 });
 
   const headers = new Headers();

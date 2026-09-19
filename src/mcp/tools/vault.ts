@@ -19,7 +19,7 @@ export function registerVaultTools(ctx: McpRegistrationContext): void {
         limit: z.number().int().min(1).max(1000).optional(),
       },
       async ({ prefix, cursor, limit }) => {
-        const r = await ctx.env.BEDROCK.list({
+        const r = await ctx.env.MINERAL.list({
           prefix,
           cursor,
           limit: limit ?? 100,
@@ -52,7 +52,7 @@ export function registerVaultTools(ctx: McpRegistrationContext): void {
         const folders = new Map<string, { count: number; lastModified: Date }>();
         let cursor: string | undefined;
         do {
-          const r = await ctx.env.BEDROCK.list({ cursor, limit: 1000 });
+          const r = await ctx.env.MINERAL.list({ cursor, limit: 1000 });
           for (const o of r.objects) {
             const top = o.key.includes("/") ? o.key.split("/")[0] : "(root)";
             const cur = folders.get(top);
@@ -93,7 +93,7 @@ export function registerVaultTools(ctx: McpRegistrationContext): void {
         const all: R2Object[] = [];
         let cursor: string | undefined;
         do {
-          const r = await ctx.env.BEDROCK.list({ prefix, cursor, limit: 1000 });
+          const r = await ctx.env.MINERAL.list({ prefix, cursor, limit: 1000 });
           all.push(...r.objects);
           cursor = r.truncated ? r.cursor : undefined;
         } while (cursor);
@@ -128,7 +128,7 @@ export function registerVaultTools(ctx: McpRegistrationContext): void {
 
         let cursor: string | undefined;
         do {
-          const r = await ctx.env.BEDROCK.list({ cursor, limit: 1000 });
+          const r = await ctx.env.MINERAL.list({ cursor, limit: 1000 });
           for (const o of r.objects) {
             totalCount++;
             totalSize += o.size;
