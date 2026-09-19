@@ -6,10 +6,12 @@ import { registerGraphTools } from "./tools/graph";
 import { registerLinkTools } from "./tools/links";
 import { registerSearchTools } from "./tools/search";
 import { registerVaultTools } from "./tools/vault";
+import { registerTagTools } from "./tools/tags";
 import { type McpRegistrationContext } from "./shared";
 
 export async function registerBedrockMcp(ctx: McpRegistrationContext): Promise<void> {
   registerVaultTools(ctx);
+  registerTagTools(ctx);
   registerDocumentTools(ctx);
   registerFileTools(ctx);
   registerSearchTools(ctx);

@@ -109,7 +109,7 @@ export function registerBedrockPrompts(ctx: McpRegistrationContext): void {
         prefix ? `只检查目录：${prefix}` : "检查整个 vault。",
         "",
         "工作流：",
-        "1. 使用 graph_get、graph_find_orphans、vault_list_tags、vault_list_folders 和 search_text 了解结构。",
+        "1. 使用 graph_get、graph_find_orphans、tag_list、vault_list_folders 和 search_text 了解结构。",
         "2. 找出死链、孤立笔记、标签混乱、目录命名不一致和可能重复的主题。",
         "3. 给出低风险优先的维护顺序。",
         "4. 不执行删除、移动、重命名或写入；只生成计划和建议命令。",

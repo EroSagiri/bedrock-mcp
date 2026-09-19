@@ -219,17 +219,6 @@ export function registerBedrockResources(ctx: McpRegistrationContext): void {
 
   registerResourceCompat(
     ctx.server,
-    "res_vault_tags",
-    "bedrock://tags",
-    { description: "vault 内所有 #tag 及出现次数。", mimeType: "application/json" },
-    async uri => {
-      const tags = await collectTags(ctx.env.BEDROCK);
-      return jsonResource(uri, { totalUnique: tags.length, tags });
-    }
-  );
-
-  registerResourceCompat(
-    ctx.server,
     "res_vault_folders",
     "bedrock://folders",
     { description: "vault 文件夹前缀及文本文件数。", mimeType: "application/json" },
@@ -302,43 +291,6 @@ export function registerBedrockResources(ctx: McpRegistrationContext): void {
         }
       }
       throw new Error(`未找到 ${d} 的日记`);
-    }
-  );
-
-  registerResourceCompat(
-    ctx.server,
-    "res_tag",
-    new ResourceTemplate("bedrock://tag/{tag}", {
-      list: async () => ({
-        resources: (await collectTags(ctx.env.BEDROCK)).map(item => ({
-          uri: `bedrock://tag/${encodeURIComponent(item.tag)}`,
-          name: item.tag,
-          description: `${item.count} notes`,
-          mimeType: "application/json",
-        })),
-      }),
-      complete: {
-        tag: value => completeTags(ctx.env.BEDROCK, value),
-      },
-    }),
-    { description: "按 tag 浏览笔记。", mimeType: "application/json" },
-    async (uri, { tag }) => {
-      const target = normalizeTag(decodeVar(tag));
-      const matches = await scanTextFiles(ctx.env.BEDROCK, undefined, (key, text, object) => {
-        if (isSystemKey(key)) return null;
-        const tags = extractTags(text);
-        const matchedTag = tags.find(t => t === target || t.startsWith(`${target}/`));
-        if (!matchedTag) return null;
-        return {
-          key,
-          matchedTag,
-          modified: object.uploaded.toISOString(),
-          modifiedRelative: relativeTime(object.uploaded),
-          size: object.size,
-        };
-      });
-      matches.sort((a, b) => b.modified.localeCompare(a.modified));
-      return jsonResource(uri, { tag: target, count: matches.length, matches });
     }
   );
 

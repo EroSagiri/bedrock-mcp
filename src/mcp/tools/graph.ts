@@ -5,6 +5,7 @@ import { scanTextFiles } from "../../storage/r2";
 import { extractTags, extractWikilinks } from "../../utils/markdown";
 import { relativeTime } from "../../utils/time";
 import { ok, stripTextExt, type McpRegistrationContext } from "../shared";
+import { indexQuery, readModeSchemaDescription } from "../index-client";
 
 export function registerGraphTools(ctx: McpRegistrationContext): void {
   registerToolCompat(
@@ -14,9 +15,10 @@ export function registerGraphTools(ctx: McpRegistrationContext): void {
       prefix: z.string().optional().describe("Limit scanned notes by prefix"),
       includeDangling: z.boolean().optional().describe("Include unresolved outgoing links, default true"),
       limit: z.number().int().min(1).max(2000).optional().describe("Maximum scanned text notes, default 500"),
+      readMode: z.enum(["index", "live"]).optional().describe(readModeSchemaDescription),
     },
-    async ({ prefix, includeDangling, limit }) => ok(JSON.stringify(
-      await buildGraph(ctx.env.BEDROCK, { prefix, includeDangling, limit }),
+    async ({ prefix, includeDangling, limit, readMode }) => ok(JSON.stringify(
+      (readMode ?? "index") === "index" ? await indexQuery(ctx.env, "graph", { prefix, includeDangling, limit }) : { ...(await buildGraph(ctx.env.BEDROCK, { prefix, includeDangling, limit })), source: "live", freshness: "live" },
       null,
       2
     ))
@@ -31,9 +33,10 @@ export function registerGraphTools(ctx: McpRegistrationContext): void {
       prefix: z.string().optional().describe("Limit scanned notes by prefix"),
       includeDangling: z.boolean().optional().describe("Include unresolved outgoing links, default true"),
       limit: z.number().int().min(1).max(2000).optional().describe("Maximum scanned text notes, default 500"),
+      readMode: z.enum(["index", "live"]).optional().describe(readModeSchemaDescription),
     },
-    async ({ key, depth, prefix, includeDangling, limit }) => ok(JSON.stringify(
-      await buildNeighborGraph(ctx.env.BEDROCK, key, depth ?? 1, { prefix, includeDangling, limit }),
+    async ({ key, depth, prefix, includeDangling, limit, readMode }) => ok(JSON.stringify(
+      (readMode ?? "index") === "index" ? await indexQuery(ctx.env, "graph", { operation: "neighbors", key, depth, prefix, includeDangling, limit }) : { ...(await buildNeighborGraph(ctx.env.BEDROCK, key, depth ?? 1, { prefix, includeDangling, limit })), source: "live", freshness: "live" },
       null,
       2
     ))
@@ -46,8 +49,10 @@ export function registerGraphTools(ctx: McpRegistrationContext): void {
       prefix: z.string().optional().describe("Limit scanned notes by prefix"),
       mode: z.enum(["isolated", "noIncoming", "noOutgoing"]).optional().describe("Default isolated"),
       limit: z.number().int().min(1).max(1000).optional(),
+      readMode: z.enum(["index", "live"]).optional().describe(readModeSchemaDescription),
     },
-    async ({ prefix, mode, limit }) => {
+    async ({ prefix, mode, limit, readMode }) => {
+      if ((readMode ?? "index") === "index") return ok(JSON.stringify(await indexQuery(ctx.env, "graph", { operation: "orphans", mode, prefix, limit }), null, 2));
       const files = await scanTextFiles(ctx.env.BEDROCK, prefix, (key, text, obj) => {
         if (key.startsWith(".history/") || key.startsWith(".trash/")) return null;
         return {

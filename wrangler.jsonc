@@ -19,6 +19,10 @@
 			{
 				"name": "MCP_OBJECT",
 				"class_name": "BedrockMCP"
+			},
+			{
+				"name": "VAULT_INDEX",
+				"class_name": "VaultIndex"
 			}
 		]
 	},
@@ -29,7 +33,13 @@
 				"BedrockMCP"
 			]
 		}
+		,
+		{
+			"tag": "v2-vault-index",
+			"new_sqlite_classes": ["VaultIndex"]
+		}
 	],
+	"triggers": { "crons": ["0 */2 * * *"] },
 	"r2_buckets": [
 		{
 			"binding": "BEDROCK",

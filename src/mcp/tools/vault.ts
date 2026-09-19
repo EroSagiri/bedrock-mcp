@@ -6,6 +6,7 @@ import { backlinkTargets, scanTextFiles } from "../../storage/r2";
 import { extractTags, extractWikilinks, parseFrontmatter } from "../../utils/markdown";
 import { buildMatcher, snippet, snippetAt } from "../../utils/search";
 import { relativeTime } from "../../utils/time";
+import { indexQuery, readModeSchemaDescription } from "../index-client";
 import { assertTextKey, backupTextObject, err, keyError, moveObject, ok, stripTextExt, trashKey, wikilinkReplacement, type McpRegistrationContext } from "../shared";
 
 export function registerVaultTools(ctx: McpRegistrationContext): void {
@@ -45,8 +46,9 @@ export function registerVaultTools(ctx: McpRegistrationContext): void {
     // 列出顶层目录及其文件数（vault 全景）
     registerToolCompat(ctx.server,
       "vault_list_folders",
-      {},
-      async () => {
+      { readMode: z.enum(["index", "live"]).optional().describe(readModeSchemaDescription) },
+      async ({ readMode }) => {
+        if ((readMode ?? "index") === "index") return ok(JSON.stringify(await indexQuery(ctx.env, "folders", {}), null, 2));
         const folders = new Map<string, { count: number; lastModified: Date }>();
         let cursor: string | undefined;
         do {
@@ -73,7 +75,7 @@ export function registerVaultTools(ctx: McpRegistrationContext): void {
             lastModifiedRelative: relativeTime(v.lastModified),
           }))
           .sort((a, b) => b.lastModified.localeCompare(a.lastModified));
-        return ok(JSON.stringify(items, null, 2));
+        return ok(JSON.stringify({ items, source: "live", freshness: "live" }, null, 2));
       }
     );
 
@@ -84,8 +86,10 @@ export function registerVaultTools(ctx: McpRegistrationContext): void {
       {
         limit: z.number().int().min(1).max(100).optional(),
         prefix: z.string().optional(),
+        readMode: z.enum(["index", "live"]).optional().describe(readModeSchemaDescription),
       },
-      async ({ limit, prefix }) => {
+      async ({ limit, prefix, readMode }) => {
+        if ((readMode ?? "index") === "index") return ok(JSON.stringify(await indexQuery(ctx.env, "recent", { limit, prefix }), null, 2));
         const all: R2Object[] = [];
         let cursor: string | undefined;
         do {
@@ -103,39 +107,15 @@ export function registerVaultTools(ctx: McpRegistrationContext): void {
             modifiedRelative: relativeTime(o.uploaded),
             size: o.size,
           }));
-        return ok(JSON.stringify(items, null, 2));
+        return ok(JSON.stringify({ items, source: "live", freshness: "live" }, null, 2));
       }
     );
-
-
-    // 列出 vault 里所有 #tag 及出现次数
-    registerToolCompat(ctx.server,
-      "vault_list_tags",
-      {
-        prefix: z.string().optional().describe("限定目录"),
-        minCount: z.number().int().min(1).optional().describe("最少出现次数，默认 1"),
-      },
-      async ({ prefix, minCount }) => {
-        const counter = new Map<string, number>();
-        await scanTextFiles(ctx.env.BEDROCK, prefix, (_k, text) => {
-          for (const t of extractTags(text)) counter.set(t, (counter.get(t) ?? 0) + 1);
-          return null;
-        });
-        const min = minCount ?? 1;
-        const items = [...counter.entries()]
-          .filter(([, n]) => n >= min)
-          .sort((a, b) => b[1] - a[1])
-          .map(([tag, count]) => ({ tag, count }));
-        return ok(JSON.stringify({ totalUnique: items.length, tags: items }, null, 2));
-      }
-    );
-
-
     // vault 总览统计
     registerToolCompat(ctx.server,
       "vault_stats",
-      {},
-      async () => {
+      { readMode: z.enum(["index", "live"]).optional().describe(readModeSchemaDescription) },
+      async ({ readMode }) => {
+        if ((readMode ?? "index") === "index") return ok(JSON.stringify(await indexQuery(ctx.env, "stats", {}), null, 2));
         const folderStats = new Map<string, { count: number; size: number; lastModified: Date }>();
         let totalCount = 0;
         let totalSize = 0;
@@ -194,6 +174,7 @@ export function registerVaultTools(ctx: McpRegistrationContext): void {
           latest: latest?.toISOString() ?? null,
           latestRelative: latest ? relativeTime(latest) : null,
           folders,
+          source: "live", freshness: "live",
         }, null, 2));
       }
     );

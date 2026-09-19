@@ -130,13 +130,7 @@ const TOOL_METADATA: Record<string, {
     category: "search",
     risk: "read",
     title: "Search text",
-    description: "Search filenames, paths, content, tags, or frontmatter.",
-  },
-  search_tag: {
-    category: "search",
-    risk: "read",
-    title: "Search tag",
-    description: "Find notes that contain a tag, including nested tags.",
+    description: "Search filenames, paths, or original Markdown content.",
   },
   search_frontmatter: {
     category: "search",
@@ -198,11 +192,13 @@ const TOOL_METADATA: Record<string, {
     title: "List recent notes",
     description: "List recently modified text documents.",
   },
-  vault_list_tags: {
-    category: "vault",
-    risk: "read",
-    title: "List vault tags",
-    description: "List all markdown tags and occurrence counts.",
+  tag_list: {
+    category: "search", risk: "read", title: "List tags",
+    description: "List normalized frontmatter/body tags from the metadata index or a live Vault traversal.",
+  },
+  tag_list_documents: {
+    category: "search", risk: "read", title: "List tag documents",
+    description: "List documents and per-source occurrences for a normalized tag.",
   },
   vault_stats: {
     category: "vault",

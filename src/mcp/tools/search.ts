@@ -6,6 +6,7 @@ import { backlinkTargets, scanTextFiles } from "../../storage/r2";
 import { extractTags, extractWikilinks, parseFrontmatter } from "../../utils/markdown";
 import { buildMatcher, snippet, snippetAt } from "../../utils/search";
 import { relativeTime } from "../../utils/time";
+import { indexQuery, readModeSchemaDescription } from "../index-client";
 import { assertTextKey, backupTextObject, err, keyError, moveObject, ok, stripTextExt, trashKey, wikilinkReplacement, type McpRegistrationContext } from "../shared";
 
 export function registerSearchTools(ctx: McpRegistrationContext): void {
@@ -17,23 +18,30 @@ export function registerSearchTools(ctx: McpRegistrationContext): void {
         query: z.string().min(1),
         regex: z.boolean().optional().describe("把 query 当正则。例：'^# .*会议' 找'# 会议'开头的标题"),
         caseSensitive: z.boolean().optional().describe("区分大小写，默认 false"),
-        searchIn: z.array(z.enum(["content", "filename", "path", "tags", "frontmatter"]))
+        searchIn: z.array(z.enum(["content", "filename", "path", "frontmatter"]))
           .optional()
-          .describe("搜索范围。默认 ['content','filename']。content=正文，filename=文件名（含扩展），path=完整路径，tags=#标签，frontmatter=YAML 字段值"),
+          .describe("搜索范围。默认 ['content','filename']。content 始终实时扫描原始 Markdown；frontmatter 请使用 search_frontmatter。"),
         prefix: z.string().optional().describe("限定目录，例如 'daily/'"),
         limit: z.number().int().min(1).max(200).optional(),
         contextChars: z.number().int().min(20).max(500).optional().describe("片段前后字符数，默认 60"),
+        readMode: z.enum(["index", "live"]).optional().describe(readModeSchemaDescription),
       },
-      async ({ query, regex, caseSensitive, searchIn, prefix, limit, contextChars }) => {
+      async ({ query, regex, caseSensitive, searchIn, prefix, limit, contextChars, readMode }) => {
         const fields = new Set(searchIn ?? ["content", "filename"]);
         const snippetCtx = contextChars ?? 60;
         const max = limit ?? 20;
         const cs = caseSensitive ?? false;
 
+        // Content/regex searches are deliberately always live. Simple filename
+        // and path searches can use the metadata projection by default.
+        if ((readMode ?? "index") === "index" && !regex && !fields.has("content") && !fields.has("frontmatter")) {
+          return ok(JSON.stringify(await indexQuery(ctx.env, "filename-search", { query, prefix, limit: limit ?? 20 }), null, 2));
+        }
+
         const matcher = buildMatcher(query, regex ?? false, cs);
         if ("error" in matcher) return err(matcher.error);
 
-        const needsContent = fields.has("content") || fields.has("tags") || fields.has("frontmatter");
+        const needsContent = fields.has("content") || fields.has("frontmatter");
         type Hit = { in: string; field?: string; value?: string; snippet?: string };
         type FileResult = { key: string; modified: string; modifiedRelative: string; matches: Hit[] };
         const hits: FileResult[] = [];
@@ -72,20 +80,13 @@ export function registerSearchTools(ctx: McpRegistrationContext): void {
                       snippet: snippetAt(text, m.index, m.length, snippetCtx),
                     });
                   }
-                  if (fields.has("tags")) {
-                    for (const tag of extractTags(text)) {
-                      if (matcher.match(tag)) {
-                        matches.push({ in: "tags", value: tag });
-                        break;
-                      }
-                    }
-                  }
                   if (fields.has("frontmatter")) {
                     const { frontmatter } = parseFrontmatter(text);
                     if (frontmatter) {
                       for (const [k, v] of Object.entries(frontmatter)) {
-                        if (matcher.match(v) || matcher.match(k)) {
-                          matches.push({ in: "frontmatter", field: k, value: v });
+                        const normalized = typeof v === "string" ? v : JSON.stringify(v);
+                        if (matcher.match(normalized) || matcher.match(k)) {
+                          matches.push({ in: "frontmatter", field: k, value: normalized });
                           break;
                         }
                       }
@@ -119,39 +120,11 @@ export function registerSearchTools(ctx: McpRegistrationContext): void {
           searchIn: [...fields],
           count: hits.length,
           hits,
+          source: "live",
+          freshness: "live",
         }, null, 2));
       }
     );
-
-
-    // 找带某个 tag 的所有笔记
-    registerToolCompat(ctx.server,
-      "search_tag",
-      {
-        tag: z.string().min(1).describe("形如 '#项目' 或 '项目'，自动补 #"),
-        prefix: z.string().optional(),
-        limit: z.number().int().min(1).max(200).optional(),
-      },
-      async ({ tag, prefix, limit }) => {
-        const target = tag.startsWith("#") ? tag : `#${tag}`;
-        const matches = await scanTextFiles(ctx.env.BEDROCK, prefix, (k, text, o) => {
-          const tags = extractTags(text);
-          // 支持嵌套 tag 匹配：#项目 也会命中 #项目/A
-          const hit = tags.find(t => t === target || t.startsWith(target + "/"));
-          if (!hit) return null;
-          return {
-            key: k,
-            modified: o.uploaded.toISOString(),
-            modifiedRelative: relativeTime(o.uploaded),
-            matchedTag: hit,
-          };
-        }, { max: limit ?? 100 });
-        matches.sort((a, b) => b.modified.localeCompare(a.modified));
-        return ok(JSON.stringify({ tag: target, count: matches.length, matches }, null, 2));
-      }
-    );
-
-
     // 按 frontmatter 字段值过滤
     registerToolCompat(ctx.server,
       "search_frontmatter",
@@ -161,23 +134,26 @@ export function registerSearchTools(ctx: McpRegistrationContext): void {
         contains: z.string().optional().describe("子串匹配（与 value 二选一）"),
         prefix: z.string().optional(),
         limit: z.number().int().min(1).max(200).optional(),
+        readMode: z.enum(["index", "live"]).optional().describe(readModeSchemaDescription),
       },
-      async ({ field, value, contains, prefix, limit }) => {
+      async ({ field, value, contains, prefix, limit, readMode }) => {
+        if ((readMode ?? "index") === "index") return ok(JSON.stringify(await indexQuery(ctx.env, "frontmatter", { field, value, contains, prefix, limit }), null, 2));
         const matches = await scanTextFiles(ctx.env.BEDROCK, prefix, (k, text, o) => {
           const { frontmatter } = parseFrontmatter(text);
           if (!frontmatter || !(field in frontmatter)) return null;
           const v = frontmatter[field];
-          if (value !== undefined && v !== value) return null;
-          if (contains !== undefined && !v.toLowerCase().includes(contains.toLowerCase())) return null;
+          const rendered = typeof v === "string" ? v : JSON.stringify(v);
+          if (value !== undefined && rendered !== value) return null;
+          if (contains !== undefined && !rendered.toLowerCase().includes(contains.toLowerCase())) return null;
           return {
             key: k,
             modified: o.uploaded.toISOString(),
             modifiedRelative: relativeTime(o.uploaded),
-            value: v,
+            value: rendered,
           };
         }, { max: limit ?? 100 });
         matches.sort((a, b) => b.modified.localeCompare(a.modified));
-        return ok(JSON.stringify({ field, value, contains, count: matches.length, matches }, null, 2));
+        return ok(JSON.stringify({ field, value, contains, count: matches.length, matches, source: "live", freshness: "live" }, null, 2));
       }
     );
 }

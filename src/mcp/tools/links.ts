@@ -6,6 +6,7 @@ import { backlinkTargets, scanTextFiles } from "../../storage/r2";
 import { extractTags, extractWikilinks, parseFrontmatter } from "../../utils/markdown";
 import { buildMatcher, snippet, snippetAt } from "../../utils/search";
 import { relativeTime } from "../../utils/time";
+import { indexQuery, readModeSchemaDescription } from "../index-client";
 import { assertTextKey, backupTextObject, err, keyError, moveObject, ok, stripTextExt, trashKey, wikilinkReplacement, type McpRegistrationContext } from "../shared";
 
 export function registerLinkTools(ctx: McpRegistrationContext): void {
@@ -113,8 +114,10 @@ export function registerLinkTools(ctx: McpRegistrationContext): void {
       {
         key: z.string().min(1).describe("被链接的笔记，例如 '概念/二阶思考.md'"),
         limit: z.number().int().min(1).max(200).optional(),
+        readMode: z.enum(["index", "live"]).optional().describe(readModeSchemaDescription),
       },
-      async ({ key, limit }) => {
+      async ({ key, limit, readMode }) => {
+        if ((readMode ?? "index") === "index") return ok(JSON.stringify(await indexQuery(ctx.env, "backlinks", { key, limit }), null, 2));
         const targets = backlinkTargets(key);
         const matches = await scanTextFiles(ctx.env.BEDROCK, undefined, (k, text, o) => {
           if (k === key) return null; // 不返回自身
@@ -130,7 +133,7 @@ export function registerLinkTools(ctx: McpRegistrationContext): void {
           };
         }, { max: limit ?? 100 });
         matches.sort((a, b) => b.modified.localeCompare(a.modified));
-        return ok(JSON.stringify({ target: key, count: matches.length, matches }, null, 2));
+        return ok(JSON.stringify({ target: key, count: matches.length, matches, source: "live", freshness: "live" }, null, 2));
       }
     );
 
@@ -138,8 +141,9 @@ export function registerLinkTools(ctx: McpRegistrationContext): void {
     // 这篇笔记里链出去的 [[wikilinks]]
     registerToolCompat(ctx.server,
       "link_get_outgoing",
-      { key: z.string().min(1) },
-      async ({ key }) => {
+      { key: z.string().min(1), readMode: z.enum(["index", "live"]).optional().describe(readModeSchemaDescription) },
+      async ({ key, readMode }) => {
+        if ((readMode ?? "index") === "index") return ok(JSON.stringify(await indexQuery(ctx.env, "outgoing", { key }), null, 2));
         const obj = await ctx.env.BEDROCK.get(key);
         if (!obj) return err(`Not found: ${key}`);
         const text = await obj.text();
@@ -162,6 +166,7 @@ export function registerLinkTools(ctx: McpRegistrationContext): void {
           total: links.length,
           links: checks,
           deadLinks: checks.filter(c => !c.resolved).map(c => c.link),
+          source: "live", freshness: "live",
         }, null, 2));
       }
     );
