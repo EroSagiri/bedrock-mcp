@@ -8,7 +8,6 @@ import { createVaultClient } from "./vault-client";
 type VaultBinding = import("@mineral/core/vault-rpc").VaultRpc & Pick<Fetcher, "fetch" | "connect">;
 
 type DeploymentEnv = Omit<Env, "vault"> & {
-  MINERAL: R2Bucket;
   MCP_OBJECT: DurableObjectNamespace<MineralMCP>;
   VAULT: VaultBinding;
 };

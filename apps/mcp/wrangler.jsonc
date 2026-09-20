@@ -16,8 +16,5 @@
   },
   "exports": {
     "MineralMCP": { "type": "durable-object", "storage": "sqlite" }
-  },
-  "r2_buckets": [
-    { "binding": "MINERAL", "bucket_name": "mineral" }
-  ]
+  }
 }
