@@ -4,7 +4,7 @@ import {
   normalizeStaticPrefix,
   readBearerToken,
   verifyStaticAccessToken,
-} from "../src/auth/static-token";
+} from "../apps/mcp/src/auth/static-token";
 
 describe("static access tokens", () => {
   it("authorizes matching keys until expiry", async () => {

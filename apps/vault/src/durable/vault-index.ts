@@ -1,11 +1,11 @@
-import { isTextFile } from "./storage/content";
-import { extractTags, extractWikilinks, frontmatterTags, parseFrontmatter } from "./utils/markdown";
+import { isTextDocumentKey } from "@mineral/core/keys";
+import { extractTags, extractWikilinks, frontmatterTags, parseFrontmatter } from "@mineral/core/markdown";
 import { DurableObject } from "cloudflare:workers";
 
 type Env = { MINERAL: R2Bucket };
 type Row = Record<string, unknown>;
 const SYSTEM = [".history/", ".trash/", ".system/"];
-const isIndexable = (key: string) => isTextFile(key) && !SYSTEM.some(prefix => key.startsWith(prefix));
+const isIndexable = (key: string) => isTextDocumentKey(key) && !SYSTEM.some(prefix => key.startsWith(prefix));
 const rows = (result: Iterable<Row>) => [...result];
 
 /**

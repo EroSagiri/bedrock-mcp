@@ -1,4 +1,4 @@
-import { isTextFile } from "./content";
+import { isTextDocumentKey } from "@mineral/core/keys";
 
 export function backlinkTargets(key: string): Set<string> {
   const noExt = key.replace(/\.(md|markdown|mdx|txt)$/i, "");
@@ -18,7 +18,7 @@ export async function scanTextFiles<T>(
   let cursor: string | undefined;
   outer: do {
     const r = await bucket.list({ prefix, cursor, limit: 1000 });
-    const targets = r.objects.filter(o => isTextFile(o.key));
+    const targets = r.objects.filter(o => isTextDocumentKey(o.key));
     for (let i = 0; i < targets.length; i += batchSize) {
       const batch = targets.slice(i, i + batchSize);
       const results = await Promise.all(batch.map(async o => {

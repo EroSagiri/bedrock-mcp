@@ -1,5 +1,5 @@
 import type { Env } from "./types";
-import { ensureUtf8ContentType, guessContentType } from "./storage/content";
+import { ensureUtf8ContentType, guessContentType } from "@mineral/core/content";
 import { readBearerToken, verifyStaticAccessToken } from "./auth/static-token";
 
 type ServeMcp = {
@@ -42,7 +42,7 @@ export async function serveStatic(req: Request, env: Env, pathname: string): Pro
     : false;
   if (!bearerAuthorized) return Response.json({ error: "Unauthorized" }, { status: 401 });
 
-  const obj = await env.MINERAL.get(key) ?? (key.startsWith("mineral/") ? await env.MINERAL.get(key.slice("mineral/".length)) : null);
+  const obj = await env.vault.documents.get(key) ?? (key.startsWith("mineral/") ? await env.vault.documents.get(key.slice("mineral/".length)) : null);
   if (!obj?.body) return new Response("Not found", { status: 404 });
 
   const headers = new Headers();

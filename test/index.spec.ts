@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { handleFetch } from "../src/http";
-import type { Env } from "../src/types";
+import { handleFetch } from "../apps/mcp/src/http";
+import type { Env } from "../apps/mcp/src/types";
 
 const env = {} as Env;
 const ctx = {} as ExecutionContext;

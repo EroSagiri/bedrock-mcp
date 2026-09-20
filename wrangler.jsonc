@@ -5,7 +5,7 @@
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "mineral-mcp",
-	"main": "src/index.ts",
+	"main": "apps/mcp/src/entrypoint.ts",
 	"compatibility_date": "2026-04-28",
 	"observability": {
 		"enabled": true
