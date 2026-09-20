@@ -1,20 +1,15 @@
 import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { VaultIndex } from "@mineral/vault";
 import type { Env } from "./types";
 import { handleFetch } from "./http";
 import { registerMineralMcp } from "./mcp/register";
 import { createVaultClient } from "./vault-client";
-export { VaultIndex };
 
 type VaultBinding = import("@mineral/core/vault-rpc").VaultRpc & Pick<Fetcher, "fetch" | "connect">;
 
 type DeploymentEnv = Omit<Env, "vault"> & {
-  // VaultIndex is retained as an external binding during the ownership-transfer
-  // rollout; the source implementation remains exported until Phase 4D.
   MINERAL: R2Bucket;
   MCP_OBJECT: DurableObjectNamespace<MineralMCP>;
-  VAULT_INDEX: DurableObjectNamespace;
   VAULT: VaultBinding;
 };
 

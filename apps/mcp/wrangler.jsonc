@@ -11,21 +11,12 @@
   ],
   "durable_objects": {
     "bindings": [
-      { "name": "MCP_OBJECT", "class_name": "MineralMCP" },
-      // Retained during the ownership-transfer rollout, but routed to the
-      // target so it remains valid after this source tombstone commits.
-      { "name": "VAULT_INDEX", "class_name": "VaultIndex", "script_name": "mineral-vault" }
+      { "name": "MCP_OBJECT", "class_name": "MineralMCP" }
     ]
   },
   "exports": {
-    "MineralMCP": { "type": "durable-object", "storage": "sqlite" },
-    "VaultIndex": {
-      "type": "durable-object",
-      "state": "transferred",
-      "transferred_to": "mineral-vault"
-    }
+    "MineralMCP": { "type": "durable-object", "storage": "sqlite" }
   },
-  // The binding and source class remain during the transfer rollout; cleanup is Phase 4D.
   "r2_buckets": [
     { "binding": "MINERAL", "bucket_name": "mineral" }
   ]
