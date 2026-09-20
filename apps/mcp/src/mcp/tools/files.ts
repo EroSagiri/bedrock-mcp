@@ -1,8 +1,8 @@
 import { applyPatch, createPatch } from "diff";
 import { z } from "zod";
 import { registerToolCompat } from "../compat";
-import { TEXT_EXTS, encodeUtf8, guessContentType, isTextFile, textContentTypeForKey } from "../../storage/content";
-import { backlinkTargets, scanTextFiles } from "../../storage/r2";
+import { TEXT_EXTS, encodeUtf8, guessContentType, isTextFile, textContentTypeForKey } from "@mineral/core/content";
+import { backlinkTargets, scanTextFiles } from "@mineral/vault";
 import { extractTags, extractWikilinks, parseFrontmatter } from "../../utils/markdown";
 import { buildMatcher, snippet, snippetAt } from "../../utils/search";
 import { relativeTime } from "../../utils/time";
@@ -55,7 +55,7 @@ export function registerFileTools(ctx: McpRegistrationContext): void {
       async ({ key, permanent, dryRun }) => {
         const invalid = keyError(key);
         if (invalid) return err(invalid);
-        const existed = await ctx.env.MINERAL.head(key);
+        const existed = await ctx.env.vault.documents.head(key);
         if (!existed) return err(`Not found: ${key}`);
         if (dryRun) {
           return ok(JSON.stringify({
@@ -68,10 +68,10 @@ export function registerFileTools(ctx: McpRegistrationContext): void {
         }
         if (!permanent) {
           const target = trashKey(key);
-          await moveObject(ctx.env.MINERAL, key, target);
+          await moveObject(ctx.env.vault.documents, key, target);
           return ok(JSON.stringify({ ok: true, key, action: "trashed", trashKey: target }, null, 2));
         }
-        await ctx.env.MINERAL.delete(key);
+        await ctx.env.vault.documents.delete(key);
         return ok(JSON.stringify({ ok: true, key, action: "deleted", permanent: true }, null, 2));
       }
     );
@@ -98,12 +98,12 @@ export function registerFileTools(ctx: McpRegistrationContext): void {
         if (dryRun) return ok(JSON.stringify({ ok: true, dryRun: true, count: keys.length, plan }, null, 2));
         if (!permanent) {
           for (const item of plan) {
-            const existed = await ctx.env.MINERAL.head(item.key);
-            if (existed && item.trashKey) await moveObject(ctx.env.MINERAL, item.key, item.trashKey);
+            const existed = await ctx.env.vault.documents.head(item.key);
+            if (existed && item.trashKey) await moveObject(ctx.env.vault.documents, item.key, item.trashKey);
           }
           return ok(JSON.stringify({ ok: true, action: "trashed", count: keys.length, items: plan }, null, 2));
         }
-        await ctx.env.MINERAL.delete(keys);
+        await ctx.env.vault.documents.delete(keys);
         return ok(JSON.stringify({ ok: true, action: "deleted", permanent: true, deleted: keys.length, keys }, null, 2));
       }
     );
@@ -133,7 +133,7 @@ export function registerFileTools(ctx: McpRegistrationContext): void {
           return err(`文件过大 (${bytes.byteLength} bytes)，上限 ${MAX}。大文件请直接 PUT /static/<key> 或 POST /upload`);
         }
         const ct = contentType ?? guessContentType(key);
-        await ctx.env.MINERAL.put(key, bytes, { httpMetadata: { contentType: ct } });
+        await ctx.env.vault.documents.put(key, bytes, { httpMetadata: { contentType: ct } });
         return ok(JSON.stringify({
           ok: true,
           key,
@@ -153,7 +153,7 @@ export function registerFileTools(ctx: McpRegistrationContext): void {
         key: z.string().min(1),
       },
       async ({ key }) => {
-        const obj = await ctx.env.MINERAL.head(key);
+        const obj = await ctx.env.vault.documents.head(key);
         if (!obj) return err(`Not found: ${key}`);
         return ok(JSON.stringify({
           key,
@@ -176,9 +176,9 @@ export function registerFileTools(ctx: McpRegistrationContext): void {
       async ({ path }) => {
         const folder = path.replace(/\/+$/, "");
         const placeholder = `${folder}/.keep`;
-        const existed = await ctx.env.MINERAL.head(placeholder);
+        const existed = await ctx.env.vault.documents.head(placeholder);
         if (existed) return ok(JSON.stringify({ ok: true, folder, action: "exists" }, null, 2));
-        await ctx.env.MINERAL.put(placeholder, encodeUtf8(""), {
+        await ctx.env.vault.documents.put(placeholder, encodeUtf8(""), {
           httpMetadata: { contentType: "text/plain; charset=utf-8" },
         });
         return ok(JSON.stringify({
@@ -205,17 +205,17 @@ export function registerFileTools(ctx: McpRegistrationContext): void {
         const toInvalid = keyError(to);
         if (toInvalid) return err(toInvalid);
         if (from === to) return err("from 和 to 相同");
-        const src = await ctx.env.MINERAL.get(from);
+        const src = await ctx.env.vault.documents.get(from);
         if (!src) return err(`源文件不存在：${from}`);
         if (!overwrite) {
-          const dst = await ctx.env.MINERAL.head(to);
+          const dst = await ctx.env.vault.documents.head(to);
           if (dst) return err(`目标已存在，传 overwrite: true 强制覆盖：${to}`);
         }
-        await ctx.env.MINERAL.put(to, src.body, {
-          httpMetadata: src.httpMetadata,
-          customMetadata: src.customMetadata,
+        await ctx.env.vault.documents.put(to, src.body, {
+          httpMetadata: src.httpMetadata ?? undefined,
+          customMetadata: src.customMetadata ?? undefined,
         });
-        await ctx.env.MINERAL.delete(from);
+        await ctx.env.vault.documents.delete(from);
         return ok(JSON.stringify({ ok: true, from, to }, null, 2));
       }
     );

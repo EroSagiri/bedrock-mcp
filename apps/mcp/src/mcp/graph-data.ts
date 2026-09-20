@@ -1,6 +1,7 @@
-import { scanTextFiles } from "../storage/r2";
+import { scanTextFiles } from "@mineral/vault";
 import { extractTags, extractWikilinks } from "../utils/markdown";
 import { stripTextExt } from "./shared";
+import type { VaultDocuments } from "@mineral/vault";
 
 export type GraphOptions = {
   prefix?: string;
@@ -8,7 +9,7 @@ export type GraphOptions = {
   limit?: number;
 };
 
-export async function buildGraph(bucket: R2Bucket, options: GraphOptions = {}) {
+export async function buildGraph(bucket: VaultDocuments, options: GraphOptions = {}) {
   const files = await scanTextFiles(bucket, options.prefix, (key, text, obj) => {
     if (key.startsWith(".history/") || key.startsWith(".trash/")) return null;
     return {
@@ -70,7 +71,7 @@ export async function buildGraph(bucket: R2Bucket, options: GraphOptions = {}) {
   };
 }
 
-export async function buildNeighborGraph(bucket: R2Bucket, key: string, depth = 1, options: GraphOptions = {}) {
+export async function buildNeighborGraph(bucket: VaultDocuments, key: string, depth = 1, options: GraphOptions = {}) {
   const graph = await buildGraph(bucket, options);
   const selectedDepth = Math.max(1, Math.min(depth, 3));
   const selected = new Set<string>([key]);

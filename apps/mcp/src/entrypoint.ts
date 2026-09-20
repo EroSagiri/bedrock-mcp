@@ -17,14 +17,14 @@ export class MineralMCP extends McpAgent<DeploymentEnv> {
 
   async init() {
     const vault = createVaultService(this.env);
-    await registerMineralMcp({ env: { ...this.env, vault, MINERAL: vault.documents }, server: this.server });
+    await registerMineralMcp({ env: { vault, STATIC_ACCESS_SECRET: this.env.STATIC_ACCESS_SECRET, PUBLIC_BASE_URL: this.env.PUBLIC_BASE_URL }, server: this.server });
   }
 }
 
 export default {
   async fetch(req: Request, env: DeploymentEnv, ctx: ExecutionContext) {
     const vault = createVaultService(env);
-    return handleFetch(req, { ...env, vault, MINERAL: vault.documents }, ctx, MineralMCP.serve("/mcp"));
+    return handleFetch(req, { vault, STATIC_ACCESS_SECRET: env.STATIC_ACCESS_SECRET, PUBLIC_BASE_URL: env.PUBLIC_BASE_URL }, ctx, MineralMCP.serve("/mcp"));
   },
   async scheduled(_controller: ScheduledController, env: DeploymentEnv, ctx: ExecutionContext) {
     ctx.waitUntil(createVaultService(env).index.refresh());

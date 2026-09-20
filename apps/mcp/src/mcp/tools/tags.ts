@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { scanTextFiles } from "../../storage/r2";
+import { scanTextFiles } from "@mineral/vault";
 import { extractTags, frontmatterTags, normalizeTag, parseFrontmatter } from "../../utils/markdown";
 import { registerToolCompat } from "../compat";
 import { indexQuery, readModeSchemaDescription } from "../index-client";
@@ -20,7 +20,7 @@ export function registerTagTools(ctx: McpRegistrationContext): void {
     const selected = sources ?? ["frontmatter", "body"];
     if ((readMode ?? "index") === "index") return ok(JSON.stringify(await indexQuery(ctx.env, "tags", { sources: selected, tagPrefix: prefix, minReferences, limit }), null, 2));
     const values = new Map<string, { referenceCount: number; documents: Set<string>; frontmatterReferences: number; bodyReferences: number }>();
-    await scanTextFiles(ctx.env.MINERAL, undefined, (key, text) => {
+    await scanTextFiles(ctx.env.vault.documents, undefined, (key, text) => {
       if (isSystemKey(key)) return null;
       const bySource = sourceTags(text, selected);
       for (const source of ["frontmatter", "body"] as const) for (const tag of bySource[source]) {
@@ -40,7 +40,7 @@ export function registerTagTools(ctx: McpRegistrationContext): void {
   }, async ({ tag, sources, match, prefix, limit, readMode }) => {
     const normalized = normalizeTag(tag); const selected = sources ?? ["frontmatter", "body"];
     if ((readMode ?? "index") === "index") return ok(JSON.stringify(await indexQuery(ctx.env, "tag-documents", { tag: normalized, sources: selected, match, prefix, limit }), null, 2));
-    const matches = await scanTextFiles(ctx.env.MINERAL, prefix, (key, text, object) => {
+    const matches = await scanTextFiles(ctx.env.vault.documents, prefix, (key, text, object) => {
       if (isSystemKey(key)) return null;
       const source = sourceTags(text, selected); const counts = { frontmatterReferences: 0, bodyReferences: 0 };
       for (const kind of ["frontmatter", "body"] as const) for (const item of source[kind]) if (item === normalized || (match === "descendants" && item.startsWith(`${normalized}/`))) counts[`${kind}References`]++;

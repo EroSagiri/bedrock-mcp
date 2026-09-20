@@ -1,8 +1,8 @@
 import { applyPatch, createPatch } from "diff";
 import { z } from "zod";
 import { registerToolCompat } from "../compat";
-import { TEXT_EXTS, encodeUtf8, guessContentType, isTextFile, textContentTypeForKey } from "../../storage/content";
-import { backlinkTargets, scanTextFiles } from "../../storage/r2";
+import { TEXT_EXTS, encodeUtf8, guessContentType, isTextFile, textContentTypeForKey } from "@mineral/core/content";
+import { backlinkTargets, scanTextFiles } from "@mineral/vault";
 import { extractTags, extractWikilinks, parseFrontmatter } from "../../utils/markdown";
 import { buildMatcher, snippet, snippetAt } from "../../utils/search";
 import { relativeTime } from "../../utils/time";
@@ -28,7 +28,7 @@ export function registerVaultTools(ctx: McpRegistrationContext): void {
         limit: z.number().int().min(1).max(1000).optional(),
       },
       async ({ prefix, cursor, limit }) => {
-        const r = await ctx.env.MINERAL.list({
+        const r = await ctx.env.vault.documents.list({
           prefix,
           cursor,
           limit: limit ?? 100,
@@ -61,7 +61,7 @@ export function registerVaultTools(ctx: McpRegistrationContext): void {
         const folders = new Map<string, { count: number; lastModified: Date }>();
         let cursor: string | undefined;
         do {
-          const r = await ctx.env.MINERAL.list({ cursor, limit: 1000 });
+          const r = await ctx.env.vault.documents.list({ cursor, limit: 1000 });
           for (const o of r.objects) {
             const top = o.key.includes("/") ? o.key.split("/")[0] : "(root)";
             const cur = folders.get(top);
@@ -74,7 +74,7 @@ export function registerVaultTools(ctx: McpRegistrationContext): void {
               cur.count += 1;
             }
           }
-          cursor = r.truncated ? r.cursor : undefined;
+          cursor = r.cursor ?? undefined;
         } while (cursor);
         const items = [...folders.entries()]
           .map(([name, v]) => ({
@@ -99,12 +99,12 @@ export function registerVaultTools(ctx: McpRegistrationContext): void {
       },
       async ({ limit, prefix, readMode }) => {
         if ((readMode ?? "index") === "index") return ok(JSON.stringify(await indexQuery(ctx.env, "recent", { limit, prefix }), null, 2));
-        const all: R2Object[] = [];
+        const all: Awaited<ReturnType<typeof ctx.env.vault.documents.list>>["items"] = [];
         let cursor: string | undefined;
         do {
-          const r = await ctx.env.MINERAL.list({ prefix, cursor, limit: 1000 });
+          const r = await ctx.env.vault.documents.list({ prefix, cursor, limit: 1000 });
           all.push(...r.objects);
-          cursor = r.truncated ? r.cursor : undefined;
+          cursor = r.cursor ?? undefined;
         } while (cursor);
         const items = all
           .filter(o => isTextFile(o.key))
@@ -137,7 +137,7 @@ export function registerVaultTools(ctx: McpRegistrationContext): void {
 
         let cursor: string | undefined;
         do {
-          const r = await ctx.env.MINERAL.list({ cursor, limit: 1000 });
+          const r = await ctx.env.vault.documents.list({ cursor, limit: 1000 });
           for (const o of r.objects) {
             totalCount++;
             totalSize += o.size;
@@ -160,7 +160,7 @@ export function registerVaultTools(ctx: McpRegistrationContext): void {
               folderStats.set(top, { count: 1, size: o.size, lastModified: o.uploaded });
             }
           }
-          cursor = r.truncated ? r.cursor : undefined;
+          cursor = r.cursor ?? undefined;
         } while (cursor);
 
         const folders = [...folderStats.entries()]

@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { registerToolCompat } from "../compat";
 import { buildGraph, buildNeighborGraph } from "../graph-data";
-import { scanTextFiles } from "../../storage/r2";
+import { scanTextFiles } from "@mineral/vault";
 import { extractTags, extractWikilinks } from "../../utils/markdown";
 import { relativeTime } from "../../utils/time";
 import { ok, stripTextExt, type McpRegistrationContext } from "../shared";
@@ -18,7 +18,7 @@ export function registerGraphTools(ctx: McpRegistrationContext): void {
       readMode: z.enum(["index", "live"]).optional().describe(readModeSchemaDescription),
     },
     async ({ prefix, includeDangling, limit, readMode }) => ok(JSON.stringify(
-      (readMode ?? "index") === "index" ? await indexQuery(ctx.env, "graph", { prefix, includeDangling, limit }) : { ...(await buildGraph(ctx.env.MINERAL, { prefix, includeDangling, limit })), source: "live", freshness: "live" },
+      (readMode ?? "index") === "index" ? await indexQuery(ctx.env, "graph", { prefix, includeDangling, limit }) : { ...(await buildGraph(ctx.env.vault.documents, { prefix, includeDangling, limit })), source: "live", freshness: "live" },
       null,
       2
     ))
@@ -36,7 +36,7 @@ export function registerGraphTools(ctx: McpRegistrationContext): void {
       readMode: z.enum(["index", "live"]).optional().describe(readModeSchemaDescription),
     },
     async ({ key, depth, prefix, includeDangling, limit, readMode }) => ok(JSON.stringify(
-      (readMode ?? "index") === "index" ? await indexQuery(ctx.env, "graph", { operation: "neighbors", key, depth, prefix, includeDangling, limit }) : { ...(await buildNeighborGraph(ctx.env.MINERAL, key, depth ?? 1, { prefix, includeDangling, limit })), source: "live", freshness: "live" },
+      (readMode ?? "index") === "index" ? await indexQuery(ctx.env, "graph", { operation: "neighbors", key, depth, prefix, includeDangling, limit }) : { ...(await buildNeighborGraph(ctx.env.vault.documents, key, depth ?? 1, { prefix, includeDangling, limit })), source: "live", freshness: "live" },
       null,
       2
     ))
@@ -53,7 +53,7 @@ export function registerGraphTools(ctx: McpRegistrationContext): void {
     },
     async ({ prefix, mode, limit, readMode }) => {
       if ((readMode ?? "index") === "index") return ok(JSON.stringify(await indexQuery(ctx.env, "graph", { operation: "orphans", mode, prefix, limit }), null, 2));
-      const files = await scanTextFiles(ctx.env.MINERAL, prefix, (key, text, obj) => {
+      const files = await scanTextFiles(ctx.env.vault.documents, prefix, (key, text, obj) => {
         if (key.startsWith(".history/") || key.startsWith(".trash/")) return null;
         return {
           key,

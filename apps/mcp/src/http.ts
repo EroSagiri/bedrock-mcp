@@ -43,17 +43,15 @@ export async function serveStatic(req: Request, env: Env, pathname: string): Pro
   if (!bearerAuthorized) return Response.json({ error: "Unauthorized" }, { status: 401 });
 
   const obj = await env.vault.documents.get(key) ?? (key.startsWith("mineral/") ? await env.vault.documents.get(key.slice("mineral/".length)) : null);
-  if (!obj?.body) return new Response("Not found", { status: 404 });
+  if (!obj) return new Response("Not found", { status: 404 });
 
   const headers = new Headers();
-  obj.writeHttpMetadata(headers);
-  headers.set("ETag", obj.httpEtag);
-  headers.set("Content-Type", ensureUtf8ContentType(headers.get("Content-Type") ?? guessContentType(key)));
+  headers.set("Content-Type", ensureUtf8ContentType(obj.contentType ?? guessContentType(key)));
 
   if (req.method === "HEAD") {
     return new Response(null, { status: 200, headers });
   }
-  return new Response(obj.body, { headers });
+  return new Response(obj.bytes.buffer as ArrayBuffer, { headers });
 }
 
 export async function handleFetch(req: Request, env: Env, ctx: ExecutionContext, mcp: ServeMcp): Promise<Response> {

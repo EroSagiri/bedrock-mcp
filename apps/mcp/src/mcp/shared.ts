@@ -1,8 +1,8 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Env } from "../types";
+import type { VaultDocumentMetadata, VaultService } from "@mineral/vault";
 import { TEXT_EXTS, isTextFile } from "@mineral/core/content";
 import { stripDocumentExtension, validateDocumentKey } from "@mineral/core/keys";
-import { backupTextDocument, moveDocument } from "@mineral/vault";
 
 export type McpRegistrationContext = {
   env: Env;
@@ -41,5 +41,30 @@ export function wikilinkReplacement(text: string, targets: Set<string>, replacem
   return { text: next, changed };
 }
 
-export const backupTextObject = backupTextDocument;
-export const moveObject = moveDocument;
+export const decodeDocumentText = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
+export const backupTextObject = (documents: VaultService["documents"], key: string, text: string, contentType?: string) => documents.backupText(key, text, contentType);
+export const moveObject = (documents: VaultService["documents"], from: string, to: string) => documents.move(from, to);
+
+export async function listAllDocuments(vault: VaultService, prefix?: string): Promise<VaultDocumentMetadata[]> {
+  const items: VaultDocumentMetadata[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await vault.documents.list({ prefix, cursor, limit: 1000 });
+    items.push(...page.items);
+    cursor = page.cursor ?? undefined;
+  } while (cursor);
+  return items;
+}
+
+export async function scanTextDocuments<T>(vault: VaultService, prefix: string | undefined, fn: (key: string, text: string, metadata: VaultDocumentMetadata) => T | null | Promise<T | null>, options: { max?: number } = {}): Promise<T[]> {
+  const values: T[] = [];
+  for (const item of await listAllDocuments(vault, prefix)) {
+    if (!isTextFile(item.key)) continue;
+    const document = await vault.documents.get(item.key);
+    if (!document) continue;
+    const value = await fn(item.key, decodeDocumentText(document.bytes), item);
+    if (value !== null) values.push(value);
+    if (values.length >= (options.max ?? Infinity)) break;
+  }
+  return values;
+}

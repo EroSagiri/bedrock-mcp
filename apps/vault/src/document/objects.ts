@@ -7,8 +7,10 @@ function timestampSlug(date = new Date()): string {
 
 export async function backupTextDocument(documents: VaultDocuments, key: string, text: string, contentType?: string): Promise<string> {
   const backupKey = `.history/${timestampSlug()}/${key}`;
-  await documents.put(backupKey, encodeUtf8(text), {
-    httpMetadata: { contentType: textContentTypeForKey(key, contentType) },
+  await documents.put({
+    key: backupKey,
+    bytes: encodeUtf8(text),
+    contentType: textContentTypeForKey(key, contentType),
     customMetadata: { sourceKey: key, createdAt: new Date().toISOString() },
   });
   return backupKey;
@@ -16,7 +18,7 @@ export async function backupTextDocument(documents: VaultDocuments, key: string,
 
 export async function moveDocument(documents: VaultDocuments, from: string, to: string): Promise<void> {
   const source = await documents.get(from);
-  if (!source?.body) throw new Error(`Not found: ${from}`);
-  await documents.put(to, source.body, { httpMetadata: source.httpMetadata, customMetadata: source.customMetadata });
+  if (!source) throw new Error(`Not found: ${from}`);
+  await documents.put({ key: to, bytes: source.bytes, contentType: source.contentType ?? undefined, customMetadata: source.customMetadata ?? undefined });
   await documents.delete(from);
 }

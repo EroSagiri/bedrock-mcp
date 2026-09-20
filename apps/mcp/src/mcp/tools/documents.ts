@@ -1,8 +1,8 @@
 import { applyPatch, createPatch } from "diff";
 import { z } from "zod";
 import { registerToolCompat } from "../compat";
-import { TEXT_EXTS, encodeUtf8, guessContentType, isTextFile, textContentTypeForKey } from "../../storage/content";
-import { backlinkTargets, scanTextFiles } from "../../storage/r2";
+import { TEXT_EXTS, encodeUtf8, guessContentType, isTextFile, textContentTypeForKey } from "@mineral/core/content";
+import { backlinkTargets, scanTextFiles } from "@mineral/vault";
 import { extractTags, extractWikilinks, parseFrontmatter } from "../../utils/markdown";
 import { buildMatcher, snippet, snippetAt } from "../../utils/search";
 import { relativeTime } from "../../utils/time";
@@ -18,7 +18,7 @@ export function registerDocumentTools(ctx: McpRegistrationContext): void {
         raw: z.boolean().optional().describe("true=只返回原始文本，不做解析"),
       },
       async ({ key, raw }) => {
-        const obj = await ctx.env.MINERAL.get(key);
+        const obj = await ctx.env.vault.documents.get(key);
         if (!obj) return err(`Not found: ${key}`);
         const text = await obj.text();
         if (raw) return ok(text);
@@ -50,8 +50,8 @@ export function registerDocumentTools(ctx: McpRegistrationContext): void {
         if (invalid) return err(invalid);
 
         const ct = textContentTypeForKey(key, contentType);
-        const existed = await ctx.env.MINERAL.head(key);
-        await ctx.env.MINERAL.put(key, encodeUtf8(content), {
+        const existed = await ctx.env.vault.documents.head(key);
+        await ctx.env.vault.documents.put(key, encodeUtf8(content), {
           httpMetadata: { contentType: ct },
         });
 
@@ -77,7 +77,7 @@ export function registerDocumentTools(ctx: McpRegistrationContext): void {
       async ({ key, proposedContent, contextLines }) => {
         const invalid = assertTextKey(key);
         if (invalid) return err(invalid);
-        const obj = await ctx.env.MINERAL.get(key);
+        const obj = await ctx.env.vault.documents.get(key);
         if (!obj) return err(`Not found: ${key}`);
         const current = await obj.text();
         const patch = createPatch(key, current, proposedContent, "current", "proposed", {
@@ -107,7 +107,7 @@ export function registerDocumentTools(ctx: McpRegistrationContext): void {
       async ({ key, patch, dryRun, createBackup, fuzzFactor }) => {
         const invalid = assertTextKey(key);
         if (invalid) return err(invalid);
-        const obj = await ctx.env.MINERAL.get(key);
+        const obj = await ctx.env.vault.documents.get(key);
         if (!obj) return err(`Not found: ${key}`);
         const current = await obj.text();
         const patched = applyPatch(current, patch, { fuzzFactor: fuzzFactor ?? 0 });
@@ -128,9 +128,9 @@ export function registerDocumentTools(ctx: McpRegistrationContext): void {
 
         const backupKey = createBackup === false
           ? null
-          : await backupTextObject(ctx.env.MINERAL, key, current, obj.httpMetadata?.contentType);
+          : await backupTextObject(ctx.env.vault.documents, key, current, obj.httpMetadata?.contentType);
         const ct = textContentTypeForKey(key, obj.httpMetadata?.contentType);
-        await ctx.env.MINERAL.put(key, encodeUtf8(patched), { httpMetadata: { contentType: ct } });
+        await ctx.env.vault.documents.put(key, encodeUtf8(patched), { httpMetadata: { contentType: ct } });
         return ok(JSON.stringify({
           ok: true,
           key,
@@ -152,10 +152,10 @@ export function registerDocumentTools(ctx: McpRegistrationContext): void {
       async ({ key }) => {
         const invalid = assertTextKey(key);
         if (invalid) return err(invalid);
-        const obj = await ctx.env.MINERAL.get(key);
+        const obj = await ctx.env.vault.documents.get(key);
         if (!obj) return err(`Not found: ${key}`);
         const text = await obj.text();
-        const backupKey = await backupTextObject(ctx.env.MINERAL, key, text, obj.httpMetadata?.contentType);
+        const backupKey = await backupTextObject(ctx.env.vault.documents, key, text, obj.httpMetadata?.contentType);
         return ok(JSON.stringify({ ok: true, key, backupKey, size: encodeUtf8(text).length }, null, 2));
       }
     );
@@ -176,14 +176,14 @@ export function registerDocumentTools(ctx: McpRegistrationContext): void {
         const target = targetKey ?? inferred;
         const targetInvalid = assertTextKey(target);
         if (targetInvalid) return err(targetInvalid);
-        const backup = await ctx.env.MINERAL.get(backupKey);
+        const backup = await ctx.env.vault.documents.get(backupKey);
         if (!backup) return err(`Backup not found: ${backupKey}`);
-        if (!overwrite && await ctx.env.MINERAL.head(target)) {
+        if (!overwrite && await ctx.env.vault.documents.head(target)) {
           return err(`目标已存在，传 overwrite: true 强制覆盖：${target}`);
         }
         const text = await backup.text();
         const ct = textContentTypeForKey(target, backup.httpMetadata?.contentType);
-        await ctx.env.MINERAL.put(target, encodeUtf8(text), { httpMetadata: { contentType: ct } });
+        await ctx.env.vault.documents.put(target, encodeUtf8(text), { httpMetadata: { contentType: ct } });
         return ok(JSON.stringify({ ok: true, backupKey, targetKey: target, contentType: ct, size: encodeUtf8(text).length }, null, 2));
       }
     );
@@ -200,10 +200,10 @@ export function registerDocumentTools(ctx: McpRegistrationContext): void {
       async ({ key, content, contentType }) => {
         const invalid = assertTextKey(key);
         if (invalid) return err(invalid);
-        const existed = await ctx.env.MINERAL.head(key);
+        const existed = await ctx.env.vault.documents.head(key);
         if (existed) return err(`文件已存在，如需覆盖请用 doc_write：${key}`);
         const ct = textContentTypeForKey(key, contentType);
-        await ctx.env.MINERAL.put(key, encodeUtf8(content), { httpMetadata: { contentType: ct } });
+        await ctx.env.vault.documents.put(key, encodeUtf8(content), { httpMetadata: { contentType: ct } });
         return ok(JSON.stringify({ ok: true, key, action: "created", contentType: ct }, null, 2));
       }
     );
@@ -221,7 +221,7 @@ export function registerDocumentTools(ctx: McpRegistrationContext): void {
       async ({ key, content, separator, createIfMissing }) => {
         const invalid = assertTextKey(key);
         if (invalid) return err(invalid);
-        const obj = await ctx.env.MINERAL.get(key);
+        const obj = await ctx.env.vault.documents.get(key);
         const sep = separator ?? "\n\n";
         let next: string;
         let action: "created" | "appended";
@@ -235,7 +235,7 @@ export function registerDocumentTools(ctx: McpRegistrationContext): void {
           action = "appended";
         }
         const ct = textContentTypeForKey(key, obj?.httpMetadata?.contentType);
-        await ctx.env.MINERAL.put(key, encodeUtf8(next), { httpMetadata: { contentType: ct } });
+        await ctx.env.vault.documents.put(key, encodeUtf8(next), { httpMetadata: { contentType: ct } });
         return ok(JSON.stringify({ ok: true, key, action, size: encodeUtf8(next).length }, null, 2));
       }
     );
@@ -248,7 +248,7 @@ export function registerDocumentTools(ctx: McpRegistrationContext): void {
       },
       async ({ keys }) => {
         const results = await Promise.all(keys.map(async k => {
-          const obj = await ctx.env.MINERAL.get(k);
+          const obj = await ctx.env.vault.documents.get(k);
           if (!obj) return { key: k, found: false };
           return {
             key: k,
