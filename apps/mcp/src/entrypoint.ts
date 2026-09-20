@@ -10,11 +10,11 @@ export { VaultIndex };
 type VaultBinding = import("@mineral/core/vault-rpc").VaultRpc & Pick<Fetcher, "fetch" | "connect">;
 
 type DeploymentEnv = Omit<Env, "vault"> & {
-  // These remain in the generated type only because this script is still the
-  // immutable owner of the legacy VaultIndex Durable Object.
+  // VaultIndex is retained as an external binding during the ownership-transfer
+  // rollout; the source implementation remains exported until Phase 4D.
   MINERAL: R2Bucket;
   MCP_OBJECT: DurableObjectNamespace<MineralMCP>;
-  VAULT_INDEX: DurableObjectNamespace<VaultIndex>;
+  VAULT_INDEX: DurableObjectNamespace;
   VAULT: VaultBinding;
 };
 

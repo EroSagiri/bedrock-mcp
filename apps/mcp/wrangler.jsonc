@@ -12,15 +12,20 @@
   "durable_objects": {
     "bindings": [
       { "name": "MCP_OBJECT", "class_name": "MineralMCP" },
-      // Kept solely as the immutable owner of the existing VaultIndex namespace.
-      { "name": "VAULT_INDEX", "class_name": "VaultIndex" }
+      // Retained during the ownership-transfer rollout, but routed to the
+      // target so it remains valid after this source tombstone commits.
+      { "name": "VAULT_INDEX", "class_name": "VaultIndex", "script_name": "mineral-vault" }
     ]
   },
   "exports": {
     "MineralMCP": { "type": "durable-object", "storage": "sqlite" },
-    "VaultIndex": { "type": "durable-object", "storage": "sqlite" }
+    "VaultIndex": {
+      "type": "durable-object",
+      "state": "transferred",
+      "transferred_to": "mineral-vault"
+    }
   },
-  // VaultIndex is still owned by this Worker and needs this binding for its existing data path.
+  // The binding and source class remain during the transfer rollout; cleanup is Phase 4D.
   "r2_buckets": [
     { "binding": "MINERAL", "bucket_name": "mineral" }
   ]
