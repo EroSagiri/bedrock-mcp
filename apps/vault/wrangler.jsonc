@@ -14,17 +14,14 @@
     "bindings": [
       {
         "name": "VAULT_INDEX",
-        "class_name": "VaultIndex",
-        "script_name": "mineral-mcp"
+        "class_name": "VaultIndex"
       }
     ]
   },
   "exports": {
     "VaultIndex": {
       "type": "durable-object",
-      "state": "expecting-transfer",
-      "storage": "sqlite",
-      "transfer_from": "mineral-mcp"
+      "storage": "sqlite"
     }
   }
 }
