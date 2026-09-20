@@ -16,10 +16,10 @@
       { "name": "VAULT_INDEX", "class_name": "VaultIndex" }
     ]
   },
-  "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["MineralMCP"] },
-    { "tag": "v2-vault-index", "new_sqlite_classes": ["VaultIndex"] }
-  ],
+  "exports": {
+    "MineralMCP": { "type": "durable-object", "storage": "sqlite" },
+    "VaultIndex": { "type": "durable-object", "storage": "sqlite" }
+  },
   // VaultIndex is still owned by this Worker and needs this binding for its existing data path.
   "r2_buckets": [
     { "binding": "MINERAL", "bucket_name": "mineral" }
