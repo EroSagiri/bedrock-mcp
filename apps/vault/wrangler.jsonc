@@ -18,5 +18,13 @@
         "script_name": "mineral-mcp"
       }
     ]
+  },
+  "exports": {
+    "VaultIndex": {
+      "type": "durable-object",
+      "state": "expecting-transfer",
+      "storage": "sqlite",
+      "transfer_from": "mineral-mcp"
+    }
   }
 }
