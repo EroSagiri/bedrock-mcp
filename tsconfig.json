@@ -39,10 +39,11 @@
 		/* Skip type checking all .d.ts files. */
 		"skipLibCheck": true,
 		"types": [
-			"./worker-configuration.d.ts",
+			"./apps/mcp/worker-configuration.d.ts",
+			"./apps/vault/worker-configuration.d.ts",
 			"node"
 		]
 	},
 	"exclude": ["test"],
-	"include": ["worker-configuration.d.ts", "apps/**/*.ts", "packages/**/*.ts"]
+	"include": ["apps/*/worker-configuration.d.ts", "apps/**/*.ts", "packages/**/*.ts"]
 }

@@ -1,0 +1,24 @@
+// Deploy this once before apps/vault/wrangler.jsonc during the production cutover.
+// It creates the RPC Worker without a cron trigger, preventing a double refresh
+// while mineral-mcp still owns the old trigger.
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "mineral-vault",
+  "main": "src/entrypoint.ts",
+  "compatibility_date": "2026-04-28",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  "upload_source_maps": true,
+  "r2_buckets": [
+    { "binding": "MINERAL", "bucket_name": "mineral" }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "VAULT_INDEX",
+        "class_name": "VaultIndex",
+        "script_name": "mineral-mcp"
+      }
+    ]
+  }
+}

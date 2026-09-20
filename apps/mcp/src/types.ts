@@ -1,7 +1,7 @@
-import type { VaultService } from "@mineral/vault";
+import type { VaultClient } from "./vault-client";
 
 export type Env = {
-  vault: VaultService;
+  vault: VaultClient;
   STATIC_ACCESS_SECRET?: string;
   PUBLIC_BASE_URL?: string;
 };

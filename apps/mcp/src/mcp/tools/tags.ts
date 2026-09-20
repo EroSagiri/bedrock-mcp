@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { scanTextFiles } from "@mineral/vault";
+import { scanTextFiles } from "../../vault-client";
 import { extractTags, frontmatterTags, normalizeTag, parseFrontmatter } from "../../utils/markdown";
 import { registerToolCompat } from "../compat";
 import { indexQuery, readModeSchemaDescription } from "../index-client";

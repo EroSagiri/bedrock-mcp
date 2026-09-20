@@ -1,0 +1,20 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "mineral-mcp-test",
+  "main": "../apps/mcp/src/entrypoint.ts",
+  "compatibility_date": "2026-04-28",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      { "name": "MCP_OBJECT", "class_name": "MineralMCP" },
+      { "name": "VAULT_INDEX", "class_name": "VaultIndex" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["MineralMCP"] },
+    { "tag": "v2-vault-index", "new_sqlite_classes": ["VaultIndex"] }
+  ],
+  "r2_buckets": [
+    { "binding": "MINERAL", "bucket_name": "mineral-test" }
+  ]
+}

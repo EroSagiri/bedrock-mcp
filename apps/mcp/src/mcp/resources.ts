@@ -1,12 +1,12 @@
 import { ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { isTextFile } from "@mineral/core/content";
-import { scanTextFiles } from "@mineral/vault";
+import { scanTextFiles } from "../vault-client";
 import { extractTags } from "../utils/markdown";
 import { relativeTime } from "../utils/time";
 import { registerResourceCompat } from "./compat";
 import { buildGraph } from "./graph-data";
 import { type McpRegistrationContext } from "./shared";
-import type { VaultDocuments, VaultDocumentMetadata } from "@mineral/vault";
+import type { VaultDocuments, VaultDocumentMetadata } from "../vault-client";
 
 const COMPLETION_LIMIT = 50;
 

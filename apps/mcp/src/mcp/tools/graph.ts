@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { registerToolCompat } from "../compat";
 import { buildGraph, buildNeighborGraph } from "../graph-data";
-import { scanTextFiles } from "@mineral/vault";
+import { scanTextFiles } from "../../vault-client";
 import { extractTags, extractWikilinks } from "../../utils/markdown";
 import { relativeTime } from "../../utils/time";
 import { ok, stripTextExt, type McpRegistrationContext } from "../shared";

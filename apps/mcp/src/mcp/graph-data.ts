@@ -1,7 +1,7 @@
-import { scanTextFiles } from "@mineral/vault";
+import { scanTextFiles } from "../vault-client";
 import { extractTags, extractWikilinks } from "../utils/markdown";
 import { stripTextExt } from "./shared";
-import type { VaultDocuments } from "@mineral/vault";
+import type { VaultDocuments } from "../vault-client";
 
 export type GraphOptions = {
   prefix?: string;

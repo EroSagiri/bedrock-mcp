@@ -1,0 +1,27 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "mineral-mcp",
+  "main": "src/entrypoint.ts",
+  "compatibility_date": "2026-04-28",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  "upload_source_maps": true,
+  "services": [
+    { "binding": "VAULT", "service": "mineral-vault" }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "MCP_OBJECT", "class_name": "MineralMCP" },
+      // Kept solely as the immutable owner of the existing VaultIndex namespace.
+      { "name": "VAULT_INDEX", "class_name": "VaultIndex" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["MineralMCP"] },
+    { "tag": "v2-vault-index", "new_sqlite_classes": ["VaultIndex"] }
+  ],
+  // VaultIndex is still owned by this Worker and needs this binding for its existing data path.
+  "r2_buckets": [
+    { "binding": "MINERAL", "bucket_name": "mineral" }
+  ]
+}

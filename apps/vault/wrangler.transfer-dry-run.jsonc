@@ -1,0 +1,32 @@
+// Validation-only configuration. Never deploy this file: its migration would
+// transfer the production VaultIndex namespace from mineral-mcp.
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "mineral-vault",
+  "main": "src/entrypoint.ts",
+  "compatibility_date": "2026-04-28",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  "upload_source_maps": true,
+  "triggers": { "crons": ["0 */2 * * *"] },
+  "r2_buckets": [
+    { "binding": "MINERAL", "bucket_name": "mineral" }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "VAULT_INDEX", "class_name": "VaultIndex" }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1-vault-index-transfer-dry-run",
+      "transferred_classes": [
+        {
+          "from": "VaultIndex",
+          "from_script": "mineral-mcp",
+          "to": "VaultIndex"
+        }
+      ]
+    }
+  ]
+}

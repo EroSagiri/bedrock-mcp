@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Env } from "../types";
-import type { VaultDocumentMetadata, VaultService } from "@mineral/vault";
+import type { VaultClient, VaultDocumentMetadata } from "../vault-client";
 import { TEXT_EXTS, isTextFile } from "@mineral/core/content";
 import { stripDocumentExtension, validateDocumentKey } from "@mineral/core/keys";
 
@@ -42,10 +42,10 @@ export function wikilinkReplacement(text: string, targets: Set<string>, replacem
 }
 
 export const decodeDocumentText = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
-export const backupTextObject = (documents: VaultService["documents"], key: string, text: string, contentType?: string) => documents.backupText(key, text, contentType);
-export const moveObject = (documents: VaultService["documents"], from: string, to: string) => documents.move(from, to);
+export const backupTextObject = (documents: VaultClient["documents"], key: string, text: string, contentType?: string) => documents.backupText(key, text, contentType);
+export const moveObject = (documents: VaultClient["documents"], from: string, to: string) => documents.move(from, to);
 
-export async function listAllDocuments(vault: VaultService, prefix?: string): Promise<VaultDocumentMetadata[]> {
+export async function listAllDocuments(vault: VaultClient, prefix?: string): Promise<VaultDocumentMetadata[]> {
   const items: VaultDocumentMetadata[] = [];
   let cursor: string | undefined;
   do {
@@ -56,7 +56,7 @@ export async function listAllDocuments(vault: VaultService, prefix?: string): Pr
   return items;
 }
 
-export async function scanTextDocuments<T>(vault: VaultService, prefix: string | undefined, fn: (key: string, text: string, metadata: VaultDocumentMetadata) => T | null | Promise<T | null>, options: { max?: number } = {}): Promise<T[]> {
+export async function scanTextDocuments<T>(vault: VaultClient, prefix: string | undefined, fn: (key: string, text: string, metadata: VaultDocumentMetadata) => T | null | Promise<T | null>, options: { max?: number } = {}): Promise<T[]> {
   const values: T[] = [];
   for (const item of await listAllDocuments(vault, prefix)) {
     if (!isTextFile(item.key)) continue;
