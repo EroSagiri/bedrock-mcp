@@ -3,7 +3,12 @@ import { ensureUtf8ContentType, guessContentType } from "@mineral/core/content";
 import { readBearerToken, verifyStaticAccessToken } from "./auth/static-token";
 
 type ServeMcp = {
-  fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response>;
+  (req: Request): Promise<Response>;
+};
+
+export type McpRoute = {
+  matchesPath(path: string): Promise<boolean>;
+  handler: ServeMcp;
 };
 
 export const CORS_HEADERS = {
@@ -54,13 +59,13 @@ export async function serveStatic(req: Request, env: Env, pathname: string): Pro
   return new Response(obj.bytes.buffer as ArrayBuffer, { headers });
 }
 
-export async function handleFetch(req: Request, env: Env, ctx: ExecutionContext, mcp: ServeMcp): Promise<Response> {
+export async function handleFetch(req: Request, env: Env, ctx: ExecutionContext, mcp: McpRoute): Promise<Response> {
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: CORS_HEADERS });
   }
   const url = new URL(req.url);
-  if (url.pathname === "/mcp") {
-    const res = await mcp.fetch(req, env, ctx);
+  if (await mcp.matchesPath(url.pathname)) {
+    const res = await mcp.handler(req);
     return withCors(res);
   }
   if ((req.method === "GET" || req.method === "HEAD") && url.pathname.startsWith("/static/")) {

@@ -1,4 +1,4 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
 import type { Env } from "../types";
 import type { VaultClient, VaultDocumentMetadata } from "../vault-client";
 import { TEXT_EXTS, isTextFile } from "@mineral/core/content";

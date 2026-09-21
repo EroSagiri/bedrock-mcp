@@ -1,4 +1,4 @@
-import { ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { ResourceTemplate } from "@modelcontextprotocol/server";
 import { isTextFile } from "@mineral/core/content";
 import { scanTextFiles } from "../vault-client";
 import { extractTags } from "../utils/markdown";

@@ -3,23 +3,25 @@ import {
   type McpServer,
   type ReadResourceCallback,
   type ReadResourceTemplateCallback,
+  type CallToolResult,
   type RegisteredResource,
   type RegisteredResourceTemplate,
   type RegisteredTool,
   type ResourceMetadata,
-  type ToolCallback,
-} from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
+} from "@modelcontextprotocol/server";
+import type { ToolAnnotations } from "@modelcontextprotocol/server";
 import { z } from "zod";
 
 type ToolRisk = "read" | "write" | "destructive";
 type ToolCategory = "documents" | "files" | "search" | "links" | "graph" | "vault";
 
-type ToolCompatConfig<Args extends z.ZodRawShape> = {
+type ToolShape = Record<string, z.ZodType>;
+
+type ToolCompatConfig<Args extends ToolShape> = {
   title?: string;
   description?: string;
   inputSchema: Args;
-  outputSchema?: z.ZodRawShape;
+  outputSchema?: ToolShape;
   annotations?: ToolAnnotations;
   _meta?: Record<string, unknown>;
 };
@@ -224,7 +226,7 @@ function annotationsFor(risk: ToolRisk, title: string): ToolAnnotations {
   };
 }
 
-function configFor<Args extends z.ZodRawShape>(
+function configFor<Args extends ToolShape>(
   name: string,
   inputSchemaOrConfig: Args | ToolCompatConfig<Args>
 ): ToolCompatConfig<Args> {
@@ -262,25 +264,34 @@ function configFor<Args extends z.ZodRawShape>(
   };
 }
 
-export function registerToolCompat<Args extends z.ZodRawShape>(
+type ToolCompatCallback<Args extends ToolShape> = (
+  args: z.output<z.ZodObject<Args>>
+) => CallToolResult | Promise<CallToolResult>;
+
+export function registerToolCompat<Args extends ToolShape>(
   server: McpServer,
   name: string,
   inputSchema: Args,
-  cb: ToolCallback<Args>
+  cb: ToolCompatCallback<Args>
 ): RegisteredTool;
-export function registerToolCompat<Args extends z.ZodRawShape>(
+export function registerToolCompat<Args extends ToolShape>(
   server: McpServer,
   name: string,
   config: ToolCompatConfig<Args>,
-  cb: ToolCallback<Args>
+  cb: ToolCompatCallback<Args>
 ): RegisteredTool;
-export function registerToolCompat<Args extends z.ZodRawShape>(
+export function registerToolCompat<Args extends ToolShape>(
   server: McpServer,
   name: string,
   inputSchemaOrConfig: Args | ToolCompatConfig<Args>,
-  cb: ToolCallback<Args>
+  cb: ToolCompatCallback<Args>
 ): RegisteredTool {
-  return server.registerTool(name, configFor(name, inputSchemaOrConfig), cb);
+  const config = configFor(name, inputSchemaOrConfig);
+  return server.registerTool(name, {
+    ...config,
+    inputSchema: z.object(config.inputSchema),
+    outputSchema: config.outputSchema ? z.object(config.outputSchema) : undefined,
+  }, cb);
 }
 
 export function registerResourceCompat(

@@ -9,12 +9,7 @@
   "services": [
     { "binding": "VAULT", "service": "mineral-vault" }
   ],
-  "durable_objects": {
-    "bindings": [
-      { "name": "MCP_OBJECT", "class_name": "MineralMCP" }
-    ]
-  },
   "exports": {
-    "MineralMCP": { "type": "durable-object", "storage": "sqlite" }
+    "MineralMCP": { "type": "durable-object", "state": "deleted" }
   }
 }
