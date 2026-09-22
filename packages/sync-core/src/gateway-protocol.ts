@@ -1,6 +1,8 @@
 import { isRemoteChangeChannel } from "./channel.js";
 
-export { deriveRemoteChangeChannel, canonicalChannelInput, canonicalEndpoint, canonicalPrefix, isRemoteChangeChannel, type CanonicalRemoteIdentity } from "./channel.js";
+export { deriveRemoteChangeChannel, canonicalChannelInput, canonicalEndpoint, canonicalPrefix, type CanonicalRemoteIdentity } from "./channel.js";
+export { isRemoteChangeChannel };
+export { parseSubscribeMessage, SUBSCRIBE_MESSAGE_TYPES, type SubscribeMessage, type SubscribeMessageType, type CurrentGenerationMessage, type RemoteDirtyMessage } from "./gateway-subscribe.js";
 
 /** The only protocol revision this repository speaks on the wire. */
 export const SYNC_GATEWAY_PROTOCOL_VERSION = 1;
