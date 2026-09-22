@@ -1,9 +1,37 @@
 {
   "name": "@mineral/sync-core",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
+  "description": "Cross-repository sync control-plane contracts, channel derivation, and generation cursors.",
+  "files": ["dist"],
   "exports": {
-    "./*": "./src/*.ts"
+    "./sync-change": {
+      "types": "./dist/sync-change.d.ts",
+      "import": "./dist/sync-change.js",
+      "default": "./dist/sync-change.js"
+    },
+    "./channel": {
+      "types": "./dist/channel.d.ts",
+      "import": "./dist/channel.js",
+      "default": "./dist/channel.js"
+    },
+    "./gateway-protocol": {
+      "types": "./dist/gateway-protocol.d.ts",
+      "import": "./dist/gateway-protocol.js",
+      "default": "./dist/gateway-protocol.js"
+    },
+    "./gateway-subscribe": {
+      "types": "./dist/gateway-subscribe.d.ts",
+      "import": "./dist/gateway-subscribe.js",
+      "default": "./dist/gateway-subscribe.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepack": "npm run build"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.2"
   }
 }
