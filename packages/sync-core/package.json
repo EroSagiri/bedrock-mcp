@@ -1,5 +1,5 @@
 {
-  "name": "@mineral/core-sync",
+  "name": "@mineral/sync-core",
   "version": "0.0.0",
   "private": true,
   "type": "module",

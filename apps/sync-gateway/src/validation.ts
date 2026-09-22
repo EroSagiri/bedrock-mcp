@@ -1,4 +1,4 @@
-import type { MarkRemoteDirtyRequest, RemoteChangeHint } from "@mineral/core-sync/sync-change";
+import type { MarkRemoteDirtyRequest, RemoteChangeHint } from "@mineral/sync-core/sync-change";
 import { isRemoteChangeChannel } from "./channel";
 
 const MAX_HINT_BYTES = 8 * 1024;

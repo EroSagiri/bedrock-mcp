@@ -1,5 +1,5 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
-import type { MarkRemoteDirtyRequest, MarkRemoteDirtyResult } from "@mineral/core-sync/sync-change";
+import type { MarkRemoteDirtyRequest, MarkRemoteDirtyResult } from "@mineral/sync-core/sync-change";
 import { isAuthorized } from "./auth";
 import { isRemoteChangeChannel } from "./channel";
 import { RemoteChangeHub } from "./remote-change-hub";

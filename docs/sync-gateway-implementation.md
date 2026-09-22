@@ -3,7 +3,7 @@
 `apps/sync-gateway` implements the Phase 4A control plane only. It has one
 SQLite-backed `RemoteChangeHub` Durable Object per opaque channel and stores
 only the durable decimal-string generation. It has no R2 or service bindings.
-Its cross-repository DTOs live in dependency-free `packages/core-sync` rather
+Its cross-repository DTOs live in dependency-free `packages/sync-core` rather
 than the backend `packages/core` package.
 
 ## Public surface

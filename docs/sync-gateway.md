@@ -35,7 +35,7 @@ packages/
   core/
     src/
       vault-rpc.ts
-  core-sync/
+  sync-core/
     src/
       sync-change.ts    # Obsidian 与 Gateway 共用、无 core 依赖的 DTO
 ```
