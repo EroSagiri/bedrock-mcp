@@ -35,7 +35,9 @@ packages/
   core/
     src/
       vault-rpc.ts
-      sync-change.ts    # 仅在需要跨 app 的 DTO 时新增
+  core-sync/
+    src/
+      sync-change.ts    # Obsidian 与 Gateway 共用、无 core 依赖的 DTO
 ```
 
 `mineral-vault` 继续是规范数据平面：R2 真值、VaultIndex、R2 LIST 和文件读写仍在这里。`mineral-sync-gateway` 是控制平面：RemoteChangeHub、持久 generation、认证后的 HTTP/WS 客户端会话，以及未来的写入方队列、R2 事件通知消费者、临时凭据引导与 Hot 入口。它不是 R2 代理、索引器、规划器、previous state 或 MCP 入口。

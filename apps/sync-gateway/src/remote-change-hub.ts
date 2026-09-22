@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import type { MarkRemoteDirtyResult, RemoteGeneration } from "@mineral/core/sync-change";
+import type { MarkRemoteDirtyResult, RemoteGeneration } from "@mineral/core-sync/sync-change";
 
 const GENERATION_KEY = "generation";
 const noStore = { "Cache-Control": "no-store" };
