@@ -8,7 +8,7 @@ import type { VaultRpc } from "@mineral/core/vault-rpc";
 const env = {} as Env;
 const ctx = {} as ExecutionContext;
 const mcp = {
-	async handler() {
+	async handler(_request: Request) {
 		return new Response("unused");
 	},
 };

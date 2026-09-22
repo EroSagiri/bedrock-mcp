@@ -1,14 +1,14 @@
 {
-  "$schema": "../node_modules/wrangler/config-schema.json",
-  "name": "mineral-sync-gateway-test",
-  "main": "../apps/sync-gateway/src/index.ts",
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "mineral-sync-gateway",
+  "main": "src/index.ts",
   "compatibility_date": "2026-04-28",
   "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true, "traces": { "enabled": true } },
   "durable_objects": {
     "bindings": [{ "name": "REMOTE_CHANGE_HUB", "class_name": "RemoteChangeHub" }]
   },
   "exports": {
     "RemoteChangeHub": { "type": "durable-object", "storage": "sqlite" }
-  },
-  "vars": { "SYNC_GATEWAY_TOKEN": "gateway-test-token" }
+  }
 }
