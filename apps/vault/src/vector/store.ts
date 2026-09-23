@@ -190,6 +190,46 @@ export class SqlVectorStore {
    * path that was previously failing.
    */
   enqueueWithinTransaction(spec: { path: string; action: "upsert" | "remove"; targetEtag: string | null; notBefore: number }, source: string): void {
+    this.upsertIntent(spec, source);
+  }
+
+  /**
+   * The correction path: enqueues every document whose vectors are not what the frozen schema would
+   * produce.
+   *
+   * It runs at the end of an audit, and it is the only thing that notices a change no writer reported —
+   * a bumped chunker, a re-embedded model, an interrupted publish. It asks about the *index's* documents
+   * rather than walking R2 again, because the note index has already answered "what is in the vault".
+   *
+   * The candidates are selected first and enqueued one by one. That is not for performance — it is so the
+   * count this returns is the number of documents actually enqueued: an `INSERT ... SELECT` reports a
+   * row count that includes every index it touched, which made a sweep of 391 documents look like a
+   * sweep of 1173.
+   */
+  enqueueStale(now: number, revision: { chunkerVersion: number; embeddingModel: string; vectorVersion: number }): number {
+    const stale = [...this.db.exec<{ key: string; indexed_etag: string | null }>(
+      `SELECT d.key, d.indexed_etag
+       FROM documents d
+       LEFT JOIN document_vector_state s ON s.document_id = d.id
+       WHERE s.document_id IS NULL
+          OR s.status <> 'ready'
+          OR s.active_chunker_version IS NOT ?
+          OR s.active_embedding_model IS NOT ?
+          OR s.active_vector_version IS NOT ?
+          OR s.active_content_sha256 IS NOT d.content_sha256`,
+      revision.chunkerVersion, revision.embeddingModel, revision.vectorVersion,
+    )];
+    for (const row of stale) this.upsertIntent({ path: row.key, action: "upsert", targetEtag: row.indexed_etag, notBefore: now }, "system");
+    return stale.length;
+  }
+
+  /**
+   * The one place a dirty entry is written.
+   *
+   * `not_before` only ever moves forward, so a debounce window that was already pushed out cannot be
+   * pulled back in — and an audit cannot shorten a backoff a failing path has earned.
+   */
+  private upsertIntent(spec: { path: string; action: "upsert" | "remove"; targetEtag: string | null; notBefore: number }, source: string): void {
     const now = Date.now();
     this.db.exec(
       `INSERT INTO pending_vector (path, action, target_etag, source, not_before, first_dirty_at, updated_at, attempts, last_claim_at, last_error)
@@ -207,45 +247,10 @@ export class SqlVectorStore {
       spec.action,
       spec.action === "remove" ? null : spec.targetEtag,
       source,
-      spec.notBefore,
+      Math.max(spec.notBefore, 0),
       now,
       now,
     );
-  }
-
-  /**
-   * The correction path: enqueues every document whose vectors are not what the frozen schema would
-   * produce.
-   *
-   * It runs at the end of an audit, and it is the only thing that notices a change no writer reported —
-   * a bumped chunker, a re-embedded model, an interrupted publish. It asks about the *index's* documents
-   * rather than walking R2 again, because the note index has already answered "what is in the vault".
-   */
-  enqueueStale(now: number, revision: { chunkerVersion: number; embeddingModel: string; vectorVersion: number }): number {
-    const cursor = this.db.exec(
-      `INSERT INTO pending_vector (path, action, target_etag, source, not_before, first_dirty_at, updated_at, attempts, last_claim_at, last_error)
-       SELECT d.key, 'upsert', d.indexed_etag, 'system', ?, ?, ?, 0, NULL, NULL
-       FROM documents d
-       LEFT JOIN document_vector_state s ON s.document_id = d.id
-       WHERE s.document_id IS NULL
-          OR s.status <> 'ready'
-          OR s.active_chunker_version IS NOT ?
-          OR s.active_embedding_model IS NOT ?
-          OR s.active_vector_version IS NOT ?
-          OR s.active_content_sha256 IS NOT d.content_sha256
-       ON CONFLICT(path) DO UPDATE SET
-         action = excluded.action,
-         target_etag = excluded.target_etag,
-         source = excluded.source,
-         not_before = MAX(pending_vector.not_before, excluded.not_before),
-         updated_at = excluded.updated_at,
-         attempts = 0,
-         last_claim_at = NULL,
-         last_error = NULL`,
-      now, now, now,
-      revision.chunkerVersion, revision.embeddingModel, revision.vectorVersion,
-    );
-    return writtenBy(cursor);
   }
 
   pendingSummary(now: number): VectorQueueSummary {

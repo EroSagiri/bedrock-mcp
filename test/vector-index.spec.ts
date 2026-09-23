@@ -251,7 +251,7 @@ describe("the vector dirty set", () => {
 
     // This is the only path that can notice a changed chunker or model: the note index is perfectly
     // current, so an R2 walk would report nothing.
-    expect(await stub.enqueueStaleVectors(Date.now())).toBeGreaterThanOrEqual(1);
+    expect(await stub.enqueueStaleVectors(Date.now())).toBe(1);
     expect(await stub.applyVectorIntent({ path: key, action: "upsert" })).toMatchObject({ applied: true, status: "published" });
     await stub.completeVector({ path: key, etag: null, action: "upsert" });
 
