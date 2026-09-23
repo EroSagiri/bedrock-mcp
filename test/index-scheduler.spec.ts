@@ -217,8 +217,9 @@ describe("VaultIndex incremental index apply", () => {
 
     await bindings().MINERAL.delete(key);
     const removed = await stub.applyIndexIntent({ path: key, action: "remove" });
-    expect(removed).toEqual({ applied: true, indexedEtag: null });
+    expect(removed).toEqual({ applied: true, indexedEtag: null, status: "removed" });
     const after = await (await stub.fetch(new Request("https://vault-index/query", { method: "POST", body: JSON.stringify({ kind: "stats" }) }))).json() as { total: { count: number } };
     expect(after.total.count).toBe(0);
   });
 });
+

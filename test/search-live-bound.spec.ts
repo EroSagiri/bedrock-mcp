@@ -7,17 +7,17 @@ import type { VaultClient } from "../apps/mcp/src/vault-client";
 import type { Env } from "../apps/mcp/src/types";
 
 /**
- * A live content search reads one document per RPC call, so the vault's size *is* the subrequest count
- * and a Worker has a hard ceiling on those. Past it the runtime kills the invocation with "Too many
- * subrequests by single Worker invocation" - an error that names neither the cause nor the remedy.
+ * Where a content search is answered, and what it says when it cannot answer fully.
  *
- * This drives the registered tool itself, so it fails if the guard stops running before the scan, and
- * it fails if the refusal stops telling the caller what to do.
+ * Two rules are pinned here. A content search in index mode must be answered by the index and must not
+ * read a single document - that is the whole point of having a full-text index instead of a scan. And a
+ * live scan, whose cost is one read per document, must refuse a vault it cannot afford rather than be
+ * killed mid-walk by the runtime.
  */
-function vault(documents: number, reads: string[]): VaultClient {
+function vault(options: { documents: number; reads: string[]; stale?: number }): VaultClient {
   return {
     documents: {
-      async get(key: string) { reads.push(key); return null; },
+      async get(key: string) { options.reads.push(key); return null; },
       async metadata() { return null; },
       async head() { return null; },
       async list() { return { items: [], objects: [], cursor: null, truncated: false }; },
@@ -28,13 +28,9 @@ function vault(documents: number, reads: string[]): VaultClient {
     } as unknown as VaultClient["documents"],
     index: {
       async query(kind: string) {
-        // The guard asks the index how many documents a scan with this prefix would walk. The list is
-        // the same projection every indexed query uses, so it is synthesised from the size the test
-        // asked for; `stats` is here for the other tools that read it.
-        if (kind === "documents") return { documents: Array.from({ length: documents }, (_, index) => ({ key: `note-${index}.md` })) };
-        if (kind === "stats") return { total: { count: documents, sizeBytes: documents * 100 } };
-        if (kind === "filename-search") return { hits: [] };
+        if (kind === "documents") return { documents: Array.from({ length: options.documents }, (_, index) => ({ key: `note-${index}.md` })) };
         if (kind === "folders") return { items: [{ folder: "templates", count: 3 }, { folder: "(root)", count: 4 }] };
+        if (kind === "search") return { results: [{ key: "note-1.md", snippet: "mineral" }], staleDocuments: options.stale ?? 0, partial: (options.stale ?? 0) > 0 };
         return {};
       },
       async refresh() { return {}; },
@@ -45,54 +41,65 @@ function vault(documents: number, reads: string[]): VaultClient {
   } as unknown as VaultClient;
 }
 
-async function callTool(documents: number, reads: string[], args: Record<string, unknown>) {
-  const server = new McpServer({ name: "search-bound-test", version: "1.0.0" });
-  registerSearchTools({ server, env: { vault: vault(documents, reads) } as unknown as Env });
+async function callTool(options: { documents: number; stale?: number }, args: Record<string, unknown>) {
+  const reads: string[] = [];
+  const server = new McpServer({ name: "search-test", version: "1.0.0" });
+  registerSearchTools({ server, env: { vault: vault({ ...options, reads }) } as unknown as Env });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "test-client", version: "1.0.0" });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   try {
     const result = await client.callTool({ name: "search_text", arguments: args });
     const text = (result.content as Array<{ type: string; text?: string }>).map(part => part.text ?? "").join("\n");
-    return { isError: result.isError ?? false, text };
+    return { isError: result.isError ?? false, text, reads };
   } finally {
     await client.close();
   }
 }
 
-describe("search_text refuses a live content scan it cannot afford", () => {
+describe("content search is answered by the index", () => {
+  it("returns index hits without reading a single document, on any vault size", async () => {
+    const result = await callTool({ documents: MAX_LIVE_SCAN_DOCUMENTS + 5000 }, { query: "mineral" });
+
+    expect(result.isError).toBe(false);
+    expect(JSON.parse(result.text)).toMatchObject({ query: "mineral", source: "index" });
+    expect(result.reads).toEqual([]);
+  });
+
+  it("marks a search incomplete while documents are still unindexed", async () => {
+    const result = await callTool({ documents: 390, stale: 40 }, { query: "Mineral" });
+    const body = JSON.parse(result.text) as { partial: boolean; staleDocuments: number; note?: string };
+
+    expect(body.partial).toBe(true);
+    expect(body.staleDocuments).toBe(40);
+    expect(body.note).toContain("40");
+  });
+
+  it("reports a complete answer once nothing is stale", async () => {
+    const result = await callTool({ documents: 390, stale: 0 }, { query: "Mineral" });
+    const body = JSON.parse(result.text) as { partial: boolean; staleDocuments: number; note?: string };
+
+    expect(body.partial).toBe(false);
+    expect(body.staleDocuments).toBe(0);
+    expect(body.note).toBeUndefined();
+  });
+});
+
+describe("a live scan is still bounded", () => {
   it("refuses a vault past the bound without reading a single document", async () => {
-    const reads: string[] = [];
-    const result = await callTool(MAX_LIVE_SCAN_DOCUMENTS + 1, reads, { query: "mineral" });
+    const result = await callTool({ documents: MAX_LIVE_SCAN_DOCUMENTS + 1 }, { query: "mineral", readMode: "live" });
 
     expect(result.isError).toBe(true);
     const report = JSON.parse(result.text) as { error: string; documents: number; limit: number; remedies: string[] };
     expect(report.error).toBe("vault_too_large_for_live_content_search");
     expect(report.documents).toBe(MAX_LIVE_SCAN_DOCUMENTS + 1);
     expect(report.limit).toBe(MAX_LIVE_SCAN_DOCUMENTS);
-    // The remedy is the point of refusing: a prefix, the index, or a tag query.
     expect(report.remedies.join(" ")).toContain("prefix");
-    // The refusal happens *before* the scan, which is the whole reason the bound exists.
-    expect(reads).toEqual([]);
+    expect(result.reads).toEqual([]);
   });
 
-  it("still runs a content search on a vault within the bound", async () => {
-    const reads: string[] = [];
-    const result = await callTool(MAX_LIVE_SCAN_DOCUMENTS, reads, { query: "mineral" });
-
-    // A small vault lists and reads; an empty listing is a legitimate no-match answer.
+  it("runs a live scan on a vault within the bound", async () => {
+    const result = await callTool({ documents: MAX_LIVE_SCAN_DOCUMENTS }, { query: "mineral", readMode: "live" });
     expect(result.text).toContain('"query": "mineral"');
-    expect(reads).toEqual([]);
-  });
-
-  it("never applies the content bound to an index-only filename search", async () => {
-    const reads: string[] = [];
-    const result = await callTool(MAX_LIVE_SCAN_DOCUMENTS + 5000, reads, { query: "index", searchIn: ["filename", "path"], readMode: "index" });
-
-    // No content is read, so vault size is irrelevant: this path must keep working at any size.
-    expect(result.isError).toBe(false);
-    expect(reads).toEqual([]);
   });
 });
-
-

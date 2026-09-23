@@ -19,6 +19,23 @@ import { isReportedMutation, type MutationVerdict, type ReportedMutation } from 
 import { createGatewayPublisher, type GatewayRpcBinding } from "./sync-publisher/gateway-rpc";
 import { drainSyncOutbox } from "./sync-publisher/publisher";
 import { drainDueIndex } from "./index/scheduler";
+import { runIndexAudit, type AuditIndex, type AuditRun } from "./index/audit-runner";
+
+/** The nightly audit schedule, in UTC: 19:30 UTC is 03:30 at +08:00. */
+export const NIGHTLY_AUDIT_CRON = "30 19 * * *";
+
+/**
+ * Whether this tick is the nightly audit.
+ *
+ * It compares the parsed schedule rather than the whole string, so a deployment that adds a minute or
+ * two of jitter to the cron still runs its audit instead of silently never running one.
+ */
+export function isNightlyAuditTick(cron: string | undefined, nightly = NIGHTLY_AUDIT_CRON): boolean {
+  if (!cron) return false;
+  const [minute, hour] = cron.trim().split(/\s+/);
+  const [expectedMinute, expectedHour] = nightly.trim().split(/\s+/);
+  return minute === expectedMinute && hour === expectedHour;
+}
 
 /** The R2 outcome a repair may need to describe, captured at write time. */
 type CommittedWrite =
@@ -143,12 +160,75 @@ export default class VaultEntrypoint extends WorkerEntrypoint<VaultWorkerEnv> {
     return this.service().index.query(kind, input);
   }
 
+  /**
+   * Starts a revision audit now, or reports the one already running.
+   *
+   * The tool kept its name for compatibility, but its meaning changed with the live index: there is no
+   * generation to rebuild, so it walks R2, diffs it against what the index believes, and enqueues the
+   * difference. The audit never writes the index itself — the indexer does, as always.
+   */
   async refreshIndex(): Promise<Record<string, unknown>> {
-    return this.service().index.refresh();
+    return this.runAudit();
   }
 
-  async scheduled(_controller: ScheduledController): Promise<void> {
-    this.ctx.waitUntil(this.drainConsumers());
+  /**
+   * Reports what the storage engine this deployment actually uses can do.
+   *
+   * It exists so a capability question — "does production speak FTS5?" — is answered by the deployed
+   * runtime rather than by documentation or by the local test pool, which is a different build. It is
+   * kept for operators: the full-text plan depends on the answer, and it is worth being able to
+   * re-ask it after any runtime change.
+   */
+  async probeStorage(): Promise<Record<string, unknown>> {
+    const namespace = this.env.VAULT_INDEX;
+    const stub = namespace.get(namespace.idFromName("vault")) as unknown as VaultIndex;
+    const table = "probe_fts_capability";
+    const created = await stub.probeSql(`CREATE VIRTUAL TABLE IF NOT EXISTS ${table} USING fts5(key UNINDEXED, body)`);
+    const written = created.ok ? await stub.probeSql(`INSERT INTO ${table}(key, body) VALUES ('capability.md', 'mineral full text')`) : { ok: false };
+    const matched = written.ok ? await stub.probeSql(`SELECT key FROM ${table} WHERE ${table} MATCH 'mineral'`) : { ok: false };
+    const dropped = await stub.probeSql(`DROP TABLE IF EXISTS ${table}`);
+    return {
+      fts5: created.ok && written.ok && matched.ok,
+      matched: (matched.rows ?? []).length,
+      detail: created.ok ? (written.ok ? (matched.ok ? "fts5 available" : `match failed: ${matched.error}`) : `insert failed: ${written.error}`) : `create failed: ${created.error}`,
+      cleanedUp: dropped.ok,
+    };
+  }
+
+  /**
+   * The two cron duties.
+   *
+   * The drain tick only retries delivery and indexing — it is the safety net for whatever a request
+   * could not finish. The audit tick is the correction path: it finds changes no writer reported, by
+   * walking R2 rather than trusting the journal. They are separate schedules so a full walk never
+   * delays the low-latency path.
+   */
+  async scheduled(controller: ScheduledController): Promise<void> {
+    this.ctx.waitUntil(this.scheduledWork(controller.cron));
+  }
+
+  private async scheduledWork(cron: string | undefined): Promise<void> {
+    if (isNightlyAuditTick(cron)) {
+      try {
+        const run = await this.runAudit();
+        mutationLog("index audit finished", { count: run.scanned, attempts: run.enqueued });
+      } catch (error) {
+        console.error(`index audit failed error=${error instanceof Error ? error.message.slice(0, 200) : "unknown"}`);
+      }
+    }
+    await this.drainConsumers();
+  }
+
+  /**
+   * Walks the vault, diffs it against the index, and drives the indexer over the difference.
+   *
+   * It runs on the Worker rather than inside the Durable Object because the object's job is one page of
+   * work at a time; the loop, the bounded page count and the per-page drain belong to the caller.
+   */
+  private async runAudit(): Promise<AuditRun> {
+    const namespace = this.env.VAULT_INDEX;
+    const index = namespace.get(namespace.idFromName("vault")) as unknown as AuditIndex;
+    return runIndexAudit({ journal: this.journal(), index });
   }
 
   /**
@@ -282,3 +362,4 @@ export default class VaultEntrypoint extends WorkerEntrypoint<VaultWorkerEnv> {
     return outcome.response;
   }
 }
+

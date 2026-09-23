@@ -6,7 +6,12 @@
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
   "upload_source_maps": true,
-  "triggers": { "crons": ["0 */2 * * *"] },
+  "triggers": {
+    "crons": [
+      "0 */2 * * *",
+      "30 19 * * *"
+    ]
+  },
   "routes": [
     { "pattern": "vault.mineral.sighjune.com", "custom_domain": true }
   ],

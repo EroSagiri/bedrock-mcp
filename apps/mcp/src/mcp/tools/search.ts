@@ -58,14 +58,14 @@ export function registerSearchTools(ctx: McpRegistrationContext): void {
       "search_text",
       {
         query: z.string().min(1),
-        regex: z.boolean().optional().describe("把 query 当正则。例：'^# .*会议' 找'# 会议'开头的标题"),
-        caseSensitive: z.boolean().optional().describe("区分大小写，默认 false"),
+        regex: z.boolean().optional().describe("把 query 当正则（仅 live 模式支持）。例：'^# .*会议' 找'# 会议'开头的标题"),
+        caseSensitive: z.boolean().optional().describe("区分大小写，默认 false（仅 live 模式支持）"),
         searchIn: z.array(z.enum(["content", "filename", "path", "frontmatter"]))
           .optional()
-          .describe(`搜索范围，默认 ['content','filename']。content 是实时扫描：每篇文档一次读取，所以文档数超过 ${MAX_LIVE_SCAN_DOCUMENTS} 时会被拒绝，请改用 prefix 限定目录，或只按 filename/path（readMode='index'）检索。frontmatter 请用 search_frontmatter。`),
+          .describe("搜索范围，默认 ['content','filename']。index 模式下 content 走 SQLite FTS5（不读 R2，快）；只有显式 readMode='live' 才逐篇实扫，且文档数超过 " + MAX_LIVE_SCAN_DOCUMENTS + " 会被拒绝。frontmatter 请用 search_frontmatter。"),
         prefix: z.string().optional().describe("限定目录，例如 'daily/'"),
         limit: z.number().int().min(1).max(200).optional(),
-        contextChars: z.number().int().min(20).max(500).optional().describe("片段前后字符数，默认 60"),
+        contextChars: z.number().int().min(20).max(500).optional().describe("片段前后字符数，默认 60（仅 live 模式使用；index 模式由 FTS 生成片段）"),
         readMode: z.enum(["index", "live"]).optional().describe(readModeSchemaDescription),
       },
       async ({ query, regex, caseSensitive, searchIn, prefix, limit, contextChars, readMode }) => {
@@ -73,10 +73,27 @@ export function registerSearchTools(ctx: McpRegistrationContext): void {
         const snippetCtx = contextChars ?? 60;
         const max = limit ?? 20;
         const cs = caseSensitive ?? false;
+        const mode = readMode ?? "index";
 
-        // Content/regex searches are deliberately always live. Simple filename
-        // and path searches can use the metadata projection by default.
-        if ((readMode ?? "index") === "index" && !regex && !fields.has("content") && !fields.has("frontmatter")) {
+        // Full text is answered from the index, not from R2: the FTS row carries the body, so a hit and
+        // its snippet come back from one SQLite query. Only an explicit `live` request walks the vault,
+        // and that path is bounded because its cost is one read per document.
+        if (mode === "index" && !regex && !cs && (fields.has("content") || (!fields.has("content") && !fields.has("frontmatter")))) {
+          const result = await indexQuery(ctx.env, "search", { query, prefix, limit: max }) as {
+            results?: unknown[]; partial?: boolean; staleDocuments?: number;
+          };
+          return ok(JSON.stringify({
+            ...result,
+            query,
+            source: "index",
+            // A search answered while documents are still unindexed is not a complete answer, and
+            // saying so is the difference between "not found" and "not known yet".
+            ...(result.partial ? { note: `索引回填中：${result.staleDocuments ?? "?"} 篇尚未索引，本次结果可能不完整。` } : {}),
+          }, null, 2));
+        }
+
+        // Filename/path only, no content: the metadata projection is enough.
+        if (mode === "index" && !regex && !fields.has("content") && !fields.has("frontmatter")) {
           return ok(JSON.stringify(await indexQuery(ctx.env, "filename-search", { query, prefix, limit: limit ?? 20 }), null, 2));
         }
 

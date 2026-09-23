@@ -43,3 +43,38 @@ export function frontmatterTags(frontmatter: Frontmatter | null): string[] {
     .map(normalizeTag)
     .filter(Boolean);
 }
+
+export type Heading = {
+  /** 1 for `#`, 2 for `##`, and so on. */
+  level: number;
+  /** The heading text without its markers. */
+  text: string;
+  /** The 1-based line the heading sits on, so a caller can jump to it. */
+  line: number;
+};
+
+/**
+ * ATX headings, ignoring anything inside a fenced code block.
+ *
+ * Fenced blocks are tracked because a `# comment` inside one is not a heading, and a vault with shell
+ * snippets would otherwise fill the outline with noise. Setext (`===`) headings are not supported yet:
+ * they are rare in this vault, and a wrong outline is worse than a shorter one.
+ */
+export function extractHeadings(markdown: string): Heading[] {
+  const headings: Heading[] = [];
+  let fence: string | null = null;
+  const lines = markdown.split(/\r?\n/);
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index]!;
+    const fenceMatch = /^\s*(`{3,}|~{3,})/.exec(line);
+    if (fenceMatch) {
+      const marker = fenceMatch[1]![0]!;
+      fence = fence === marker ? null : fence ?? marker;
+      continue;
+    }
+    if (fence) continue;
+    const match = /^(#{1,6})\s+(.+?)\s*#*\s*$/.exec(line);
+    if (match) headings.push({ level: match[1]!.length, text: match[2]!.trim(), line: index + 1 });
+  }
+  return headings;
+}

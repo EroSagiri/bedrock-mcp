@@ -246,10 +246,15 @@ export function createVaultService(env: VaultEnv, options: { journal?: MutationJ
         if (!response.ok) throw new Error(`Vault index query failed: ${response.status}`);
         return response.json<Record<string, unknown>>();
       },
+      /**
+       * Starts a revision audit, or reports the one already running.
+       *
+       * There is no generation to rebuild any more: an audit lists R2, diffs it against the live index,
+       * and enqueues the difference for the indexer. It writes no index rows itself.
+       */
       async refresh() {
-        const response = await stub.fetch("https://vault-index/refresh", { method: "POST", body: "{}" });
-        if (!response.ok) throw new Error(`Vault index refresh failed: ${response.status}`);
-        return response.json<Record<string, unknown>>();
+        const stub = env.VAULT_INDEX.get(env.VAULT_INDEX.idFromName("vault")) as unknown as VaultIndex;
+        return stub.startIndexAudit(Date.now());
       },
     },
   };
