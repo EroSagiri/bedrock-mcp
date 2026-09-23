@@ -8,13 +8,20 @@ import type {
   VaultRpcDocument,
   VaultRpcDocumentMetadata,
 } from "@mineral/core/vault-rpc";
-import { createVaultService, type VaultDocumentMetadata } from "./service";
-import type { VaultIndex } from "./durable/vault-index";
+import { createVaultService, type VaultDocumentMetadata, type VaultService, type VaultWriteResult } from "./service";import type { VaultIndex } from "./durable/vault-index";
 import { createMutationIngress, handleMutationIngressRequest } from "./mutation/http";
+import { parseCommittedMutation, recordCommittedMutationUntilRecorded, REPAIR_ATTEMPTS, type CommittedMutationInput } from "./mutation/committed";
+import type { MutationRecorder } from "./mutation/recorder";
 import type { MutationJournal } from "./mutation/store";
+import type { MutationEvent } from "./mutation/types";
 import { createGatewayPublisher, type GatewayRpcBinding } from "./sync-publisher/gateway-rpc";
 import { drainSyncOutbox } from "./sync-publisher/publisher";
 import { drainDueIndex } from "./index/scheduler";
+
+/** The R2 outcome a repair may need to describe, captured at write time. */
+type CommittedWrite =
+  | { op: "put"; path: string; etag: string; size: number }
+  | { op: "delete"; path: string; etag?: string };
 
 // The destination Worker must ship this class when it receives the existing
 // VaultIndex namespace through a legacy transfer migration.
@@ -45,7 +52,11 @@ function toRpcMetadata(metadata: VaultDocumentMetadata): VaultRpcDocumentMetadat
  * to the Sync Publisher and the Index Scheduler.
  */
 export default class VaultEntrypoint extends WorkerEntrypoint<VaultWorkerEnv> {
-  private service() {
+  /**
+   * The one seam that exists for tests: a subclass may supply the journal, so a test can produce the
+   * "R2 committed, journal did not" state without pretending the deployed binding is broken.
+   */
+  protected service(): VaultService {
     return createVaultService(this.env);
   }
 
@@ -71,15 +82,15 @@ export default class VaultEntrypoint extends WorkerEntrypoint<VaultWorkerEnv> {
 
   async putDocument(input: PutDocumentInput): Promise<PutDocumentResult> {
     const document = await this.service().documents.put(input, { source: "mcp" });
-    this.ctx.waitUntil(this.drainConsumers(document.mutationId));
+    this.ctx.waitUntil(this.afterWrite(document, { op: "put", path: document.key, etag: document.etag, size: document.size }));
     return { etag: document.etag, size: document.size, mutationId: document.mutationId, mutationSeq: document.mutationSeq, mutationPending: document.mutationPending };
   }
 
   async deleteDocuments(keys: string | string[]): Promise<DeleteDocumentsResult> {
     const results = await this.service().documents.delete(keys, { source: "mcp" });
     const list = Array.isArray(results) ? results : [results];
-    for (const result of list) this.ctx.waitUntil(this.drainConsumers(result.mutationId));
-    return { deleted: list.map(result => result.key), mutationPending: list.some(result => result.mutationPending) };
+    for (const result of list) this.ctx.waitUntil(this.afterWrite(result, { op: "delete", path: result.key, etag: result.etag }));
+    return { deleted: list.map(result => result.key), etags: list.map(result => result.etag ?? null), mutationPending: list.some(result => result.mutationPending) };
   }
 
   async backupTextDocument(key: string, text: string, contentType?: string): Promise<string> {
@@ -101,6 +112,62 @@ export default class VaultEntrypoint extends WorkerEntrypoint<VaultWorkerEnv> {
 
   async scheduled(_controller: ScheduledController): Promise<void> {
     this.ctx.waitUntil(this.drainConsumers());
+  }
+
+  /**
+   * Records a fact about an R2 write the Vault already committed.
+   *
+   * This exists for exactly one caller shape: a writer that saw `mutationPending: true` and wants the
+   * change to reach the gateway and the index **without writing the file again**. It is idempotent by
+   * `mutationId`, so the same call can be made as often as the writer likes.
+   *
+   * A malformed submission is answered, not thrown: the caller's bytes are already durable, so this is
+   * a report about the *record*, and `recorded: false` is the honest answer. Throwing here would turn
+   * a caller's bad input into a transport-level failure of a write that in fact succeeded.
+   */
+  async recordCommittedMutation(input: CommittedMutationInput): Promise<{ recorded: boolean; seq?: number; attempts: number }> {
+    const event = parseCommittedMutation(input);
+    if (!event) return { recorded: false, attempts: 0 };
+    const repair = await this.repair(this.journal(), this.service().mutations, event);
+    if (repair.recorded) this.ctx.waitUntil(this.drainConsumers(repair.seq === undefined ? event.id : undefined));
+    return repair;
+  }
+
+  /**
+   * Retries the record, never the write.
+   *
+   * A repair that still cannot land is logged and reported as unrecorded rather than thrown, because
+   * the R2 change is already durable: nothing about a journal failure may look like a failed write.
+   */
+  private async repair(journal: MutationJournal, recorder: MutationRecorder, event: MutationEvent): Promise<{ recorded: boolean; seq?: number; attempts: number }> {
+    try {
+      return await recordCommittedMutationUntilRecorded({ journal, recorder }, event);
+    } catch (error) {
+      console.error(`mutation repair exhausted id=${event.id} op=${event.op} error=${error instanceof Error ? error.message.slice(0, 200) : "unknown"}`);
+      return { recorded: false, attempts: REPAIR_ATTEMPTS };
+    }
+  }
+
+  /**
+   * Everything a committed write still needs, run after the response.
+   *
+   * A write whose journal record failed is **not** left to a future manual `refresh()`: the repair
+   * retries the same `mutationId` until the fact lands. Only then can the gateway and the index see it.
+   */
+  private async afterWrite(written: { mutationId: string; mutationPending: boolean }, committed: CommittedWrite): Promise<void> {
+    if (written.mutationPending) {
+      const event: MutationEvent = {
+        id: written.mutationId,
+        source: "mcp",
+        committedAt: Date.now(),
+        ...(committed.op === "put"
+          ? { op: "put" as const, path: committed.path, etag: committed.etag!, size: committed.size ?? 0 }
+          : { op: "delete" as const, path: committed.path, etag: committed.etag }),
+      };
+      const repair = await this.repair(this.journal(), this.service().mutations, event);
+      if (!repair.recorded) return;
+    }
+    await this.drainConsumers(written.mutationId);
   }
 
   /**

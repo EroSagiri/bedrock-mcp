@@ -49,6 +49,13 @@ export type MutationWriteOrigin = "local-write" | "remote-apply" | "unknown";
  * themselves. An MCP-originated report is not accepted on this path, because the Vault itself
  * records those writes and a second report would be a forgery vector, not a convenience.
  */
+/**
+ * A mutation a **writer is allowed to report**, keyed by the source it may claim.
+ *
+ * `id` and `committedAt` are bounded here; the source is restricted to writers that wrote to R2
+ * themselves. An MCP-originated report is not accepted on this path, because the Vault itself
+ * records those writes and a second report would be a forgery vector, not a convenience.
+ */
 export function parseIngressBody(raw: string): MutationEvent | null {
   let value: unknown;
   try { value = JSON.parse(raw); } catch { return null; }
@@ -81,12 +88,32 @@ export function normalizeEtag(etag: string): string {
 }
 
 /**
+ * The revision a report claims to describe, or `undefined` when it claims only "it is gone".
+ *
+ * A `put` always carries one. A `delete` may: the writer that removes content **logically** (an
+ * immutable tombstone, the object left in place so the deletion stays recoverable) knows exactly
+ * which revision it retired, and without that the report could never be verified at all. A `delete`
+ * with no revision keeps the original meaning — the object must be absent.
+ */
+export function reportedRevision(event: MutationEvent): string | undefined {
+  if (event.op === "put") return event.etag;
+  if (event.op === "rename") return event.etag;
+  return event.etag;
+}
+
+/**
  * Records a mutation reported by a client that wrote R2 directly.
  *
  * Idempotency is checked **before** verification: a retry whose response was lost must succeed even
  * though the object has since moved on, otherwise the retry could never be answered. A first-time
  * report is verified against the authoritative R2 state so a wrong or malicious ETag cannot pollute
  * the journal, the gateway, or the index.
+ *
+ * Two verifications, one rule each:
+ *
+ * - a **revision** is claimed → the object must currently *be* that revision (a logical delete of a
+ *   live object is still that revision);
+ * - no revision → the object must be *gone* (the existing hard-delete semantics, unchanged).
  */
 export async function recordVerifiedMutation(
   dependencies: MutationIngressDependencies,
@@ -100,7 +127,7 @@ export async function recordVerifiedMutation(
     return { status: "duplicate", record: replay };
   }
   const observed = await dependencies.verifier.observe(event.path);
-  const reported = event.op === "put" ? event.etag : event.op === "rename" ? event.etag : undefined;
+  const reported = reportedRevision(event);
   const matches = reported === undefined
     ? observed === null
     : observed !== null && normalizeEtag(observed.etag) === normalizeEtag(reported);

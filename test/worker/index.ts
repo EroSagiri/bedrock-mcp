@@ -15,6 +15,7 @@ import type { GatewayEnv } from "../../apps/sync-gateway/src/index";
 export { RemoteChangeHub } from "../../apps/sync-gateway/src/remote-change-hub";
 export { VaultIndex } from "../../apps/vault/src/durable/vault-index";
 export { SyncGatewayEntrypoint } from "../../apps/sync-gateway/src/index";
+export { default as VaultEntrypoint } from "../../apps/vault/src/entrypoint";
 
 type TestEnv = VaultWorkerEnv & GatewayEnv;
 

@@ -83,6 +83,34 @@ describe("mutation ingress verification", () => {
     expect(store.snapshotJournal()[0]).toMatchObject({ op: "delete", path: "notes/a.md" });
   });
 
+  it("accepts a delete that names the revision it retired, for writers that delete logically", async () => {
+    // A logical delete leaves the object in place (an immutable tombstone keeps it recoverable), so
+    // "the object is gone" can never verify it. The revision is what makes the report checkable.
+    const objects = { "notes/a.md": { etag: "E1", size: 10 } };
+    const { store, dependencies } = harness(objects);
+    const deleteBody = JSON.stringify({ id: "mut_obsidian_logical", source: "obsidian", op: "delete", path: "notes/a.md", etag: "E1", committedAt: 1_000 });
+    const outcome = await recordVerifiedMutation(dependencies, parseIngressBody(deleteBody)!);
+
+    expect(outcome.status).toBe("accepted");
+    expect(store.snapshotJournal()[0]).toMatchObject({ op: "delete", path: "notes/a.md", etag: "E1" });
+    // The intent is still an immediate remove: the index does not care how the delete was performed.
+    expect(store.snapshotIntents()[0]).toMatchObject({ action: "remove", notBefore: 1_000 });
+  });
+
+  it("rejects a delete that names a revision R2 no longer holds", async () => {
+    const { store, dependencies } = harness({ "notes/a.md": { etag: "NEWER", size: 11 } });
+    const deleteBody = JSON.stringify({ id: "mut_obsidian_stale", source: "obsidian", op: "delete", path: "notes/a.md", etag: "E1", committedAt: 1_000 });
+
+    expect(await recordVerifiedMutation(dependencies, parseIngressBody(deleteBody)!)).toMatchObject({ status: "rejected", reason: "state-mismatch" });
+    expect(store.snapshotJournal()).toHaveLength(0);
+  });
+
+  it("still requires an object with no named revision to be gone", async () => {
+    const { dependencies } = harness({ "notes/a.md": { etag: "E1", size: 10 } });
+    const deleteBody = JSON.stringify({ id: "mut_obsidian_hard", source: "obsidian", op: "delete", path: "notes/a.md", committedAt: 1_000 });
+    expect(await recordVerifiedMutation(dependencies, parseIngressBody(deleteBody)!)).toMatchObject({ status: "rejected" });
+  });
+
   it("answers a retry of the same mutation id idempotently, even after R2 moved on", async () => {
     const objects = { "notes/a.md": { etag: "E1", size: 10 } };
     const { store, dependencies } = harness(objects);

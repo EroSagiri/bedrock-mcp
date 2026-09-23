@@ -42,7 +42,33 @@ export type PutDocumentResult = {
 
 export type DeleteDocumentsResult = {
   deleted: string[];
+  /** The revision each object held when it was removed, in the same order as `deleted`. */
+  etags: Array<string | null>;
   mutationPending: boolean;
+};
+
+/**
+ * A fact about an R2 write the Vault already committed, submitted for recording only.
+ *
+ * A caller that observed `mutationPending: true` can hand this back — same `mutationId` — to make the
+ * change reach the gateway and the index. It never writes the file again, and it is idempotent, so it
+ * may be retried as often as the caller likes.
+ */
+export type CommittedMutationInput = {
+  id: string;
+  source: "mcp" | "web" | "system";
+  op: "put" | "delete" | "rename";
+  path: string;
+  etag?: string;
+  size?: number;
+  from?: string;
+  committedAt: number;
+};
+
+export type RecordCommittedMutationResult = {
+  recorded: boolean;
+  seq?: number;
+  attempts: number;
 };
 
 export type ListDocumentsInput = {
@@ -69,4 +95,9 @@ export type VaultRpc = {
   moveDocument(from: string, to: string): Promise<void>;
   queryIndex(kind: string, input: Record<string, unknown>): Promise<Record<string, unknown>>;
   refreshIndex(): Promise<Record<string, unknown>>;
+  /**
+   * Optional because it is only meaningful to a caller that saw `mutationPending: true`; a Vault that
+   * predates the mutation journal simply does not implement it.
+   */
+  recordCommittedMutation?(input: CommittedMutationInput): Promise<RecordCommittedMutationResult>;
 };

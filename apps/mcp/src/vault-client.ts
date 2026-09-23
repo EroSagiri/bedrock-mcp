@@ -1,10 +1,12 @@
 import { isTextDocumentKey } from "@mineral/core/keys";
 import type {
+  CommittedMutationInput,
   DeleteDocumentsResult,
   ListDocumentsInput,
   ListDocumentsResult,
   PutDocumentInput,
   PutDocumentResult,
+  RecordCommittedMutationResult,
   VaultRpc,
   VaultRpcDocumentMetadata,
 } from "@mineral/core/vault-rpc";
@@ -40,6 +42,8 @@ export type VaultClient = {
     query(kind: string, input: Record<string, unknown>): Promise<Record<string, unknown>>;
     refresh(): Promise<Record<string, unknown>>;
   };
+  /** `null` when the Vault predates the mutation journal and cannot record a committed write. */
+  recordCommittedMutation(input: CommittedMutationInput): Promise<RecordCommittedMutationResult | null>;
 };
 
 function metadata(document: VaultRpcDocumentMetadata): VaultDocumentMetadata {
@@ -78,6 +82,17 @@ export function createVaultClient(rpc: VaultRpc): VaultClient {
     index: {
       async query(kind, input) { return rpc.queryIndex(kind, input); },
       async refresh() { return rpc.refreshIndex(); },
+    },
+    /**
+     * The repair half of a write.
+     *
+     * When a write reports `mutationPending: true`, its bytes are already durable in R2 but the change
+     * has not reached the gateway or the index. Handing the same fact back — same `mutationId` —
+     * records it without writing the file again. It is idempotent, so a caller may retry freely.
+     */
+    async recordCommittedMutation(input) {
+      if (!rpc.recordCommittedMutation) return null;
+      return rpc.recordCommittedMutation(input);
     },
   };
 }

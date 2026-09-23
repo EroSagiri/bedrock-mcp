@@ -47,8 +47,12 @@ export type MutationRecorderDependencies = {
  */
 export function createMutationRecorder({ journal, now = Date.now, nextId = createMutationId }: MutationRecorderDependencies) {
   return {
-    async record(input: RecordMutationInput & { id?: string }): Promise<RecordedMutation> {
-      const event: MutationEvent = { ...input, id: input.id ?? nextId(), committedAt: now() } as MutationEvent;
+    /**
+     * `committedAt` is normally generated here. A repair supplies the original write time instead, so
+     * a retried fact keeps describing *when the change landed* rather than when the retry happened.
+     */
+    async record(input: RecordMutationInput & { id?: string; committedAt?: number }): Promise<RecordedMutation> {
+      const event: MutationEvent = { ...input, id: input.id ?? nextId(), committedAt: input.committedAt ?? now() } as MutationEvent;
       if (!isMutationEvent(event)) throw new TypeError("invalid mutation event");
       const digest = await pathDigest(event.path);
       const result = await journal.recordMutation({ event, intents: indexIntentsFor(event) });

@@ -64,6 +64,7 @@ apps/vault/src/
 │   ├── types.ts                  MutationEvent / MutationSource / JournalEntry
 │   ├── ids.ts                    mutationId 生成、path digest、结构化日志
 │   ├── ingress.ts                Obsidian 报告解析 + R2 校验（幂等优先）
+│   ├── committed.ts              repair：已落地写入的校验 + 有界幂等重试
 │   ├── http.ts                   POST /internal/mutations 的 HTTP 语义
 │   ├── recorder.ts               recordMutation()：唯一入口
 │   └── store.ts                  MutationStore / MutationJournal 端口
@@ -282,6 +283,20 @@ PC 的本地写入**不是**新的 R2 mutation。若把它也上报，就会形�
 * 即使客户端不声明，上报的 ETag 与 R2 当前值相同也只会是同一个 revision，且 mutation id 不同——
   真正的护栏是：**只有实际改变了 R2 的写入才有资格上报**，下载永远没有。
 
+### 逻辑删除如何被校验（`delete` + revision）
+
+`delete` 有两种，服务端两种都认：
+
+```text
+delete 且带 etag  → normalizeEtag(observe(path).etag) === normalizeEtag(etag)   # 该 revision 已被逻辑删除
+delete 且不带 etag → observe(path) === null                                    # 硬删除，对象必须已经不在
+```
+
+写 tombstone、把对象原地保留的客户端（删除可恢复的前提）**必须**带 revision，否则它的删除报告
+永远无法被校验，删除就会既进不了 journal、也广播不出去、索引还会一直留着那篇笔记。revision 只
+用于 ingress 校验：`gatewayChangesFor()` 始终把两种 delete 归一成 `{ op: "delete", path }`，
+所以 Gateway 的 wire 形状没有被拓宽。
+
 ---
 
 ## 8. 事务边界
@@ -301,10 +316,48 @@ commit
 | 情况 | 语义 |
 | --- | --- |
 | R2 失败 | 整个操作失败，没有 mutation，没有 intent |
-| R2 成功 + journal 失败（MCP） | **写入仍然成功**，返回 `mutationPending: true`，错误进日志。R2 是最新真相，客户端一致性靠 reconnect / reconcile 自愈 |
+| R2 成功 + journal 失败（MCP） | **写入仍然成功**，返回 `mutationPending: true`，错误进日志，并自动进入 repair（见下） |
 | R2 成功 + journal 失败（ingress） | 返回 503，客户端必须带同一 mutation id 重试 |
 
 绝不允许"journal 写失败但假装已经完整记录"。
+
+---
+
+## 8.5 R2 成功、Journal 失败的自愈（repair path）
+
+"R2 是真相"只有在 **Journal 最终一定追上 R2** 时才成立。如果失败后只能等人工 `refresh()`，
+那就不是自愈，而只是"异常被暴露出来"。所以这一层有一条不变量：
+
+> 任何已经成功落地 R2、但没有进入 Journal 的 mutation，都必须存在自动的 durable repair path。
+
+三件事共同保证它：
+
+**1. mutation id 在 R2 写入之前就生成。** `VaultService` 在 PUT 之前就拿到 id，因此即使
+journal 写入失败，调用方拿到的 `mutationId` 也是**这条事实的** id，而不是空串。repair 因此有稳定
+的幂等键可用。
+
+**2. 写入返回后立刻原地重试。** `VaultEntrypoint.afterWrite()` 在 `ctx.waitUntil` 里对同一个 id
+重试 `REPAIR_ATTEMPTS`（3）次，退避 `REPAIR_BACKOFF_MS`（200ms）。成功后照常 drain 两个消费者；
+失败则打 `mutation repair exhausted`，这次请求内不再重试。journal 的 `mutation_id UNIQUE` 让重试
+天然安全——重复只会在日志里留下一条 `mutation duplicate ignored`。
+
+**3. 调用方可以把事实交回来（`recordCommittedMutation`）。** 一个看到 `mutationPending: true`
+的写入方持有全部所需信息（id / source / op / path / etag / size），可以只补记录、**不再写 R2**：
+
+```ts
+await vault.recordCommittedMutation({
+  id: mutationId, source: "mcp", op: "put", path, etag, size, committedAt,
+});
+```
+
+它幂等（同 id 重复调用返回同一个 seq）、有界重试、永不读写 R2，并且**不会抛错**：输入不合法时返回
+`{ recorded: false }`，因为写入方的字节早已落盘，一个坏的报告请求不该看起来像一次失败的写入。
+
+仍然诚实的边界：如果 isolate 在 repair 完成之前被打断，且没有任何调用方交回事实，那么这条事实就
+只能靠写入方自己重试——服务端没有一张"未记录已提交写入"的表（那需要 Journal 之外的持久存储）。
+这正是 `recordCommittedMutation` 存在的理由：它把"最终一致"落在一个**有幂等键的显式重试**上，
+而不是落在"人类以后跑一次 refresh()"上。
+
 
 ---
 
@@ -504,10 +557,23 @@ Kafka 风格 consumer group / 分布式事务   → 不做
 把 index 状态塞进 MutationEvent         → 禁止
 ```
 
-### 关于插件侧上报（待接入）
+### 插件侧上报的状态
 
-服务端入口 `POST /internal/mutations` 已经完整实现并通过测试。插件
-（`../mineral-obsidian-sync`）目前仍然只向 Gateway 发一条 cycle 级合并的
-`markRemoteDirty(changes)`，其 `RemoteChange` 不带 ETag；要把上报接上，需要把 R2 PUT 返回的
-ETag 从 `SafeExecutor` 的 `OperationResult` 一路带到 scheduler 的 change 列表。这属于"重写
-Obsidian sync engine"的边缘，本轮只提供服务端契约与验证器，不擅自改动插件执行器。
+插件（`../mineral-obsidian-sync`，提交 `b468b3d`）已经完成上报接线：
+
+```text
+R2 PUT 响应 ──► OperationResult.remote = { size, etag }
+             ──► scheduler change 列表带 etag/size
+             ──► (a) Gateway /dirty 通知（hint）
+                 (b) POST /internal/mutations（fact，必须有 revision）
+```
+
+要点与本文档的契约一致：只有**确认落地**的写入才上报（ambiguous PUT 没有 revision，只作为 hint
+进 Gateway）；id 在落地时生成、跨重试复用，且**不由 path/etag 派生**；202 完成、204 非事实、
+409 与其他 4xx 永久放弃、429/5xx/超时保留并用同一 id 重发；上报失败不改变任何 cycle 结果；
+默认关闭时行为逐字节不变。
+
+删除此前是空的，因为插件的删除是**逻辑删除**（写 tombstone、对象原地保留），而旧的校验要求对象
+已经消失，于是必然 409。现在 `delete` 可以携带被删除的 revision（见第 7 节），服务端已经能校验并
+记录它——插件侧把删除也纳入上报即可，wire 形状无需改动。
+

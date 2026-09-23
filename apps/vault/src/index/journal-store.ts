@@ -90,7 +90,7 @@ function recordFrom(row: JournalRow): JournalEntry {
     ? { ...base, op: "put", path: row.path, etag: row.etag ?? "", size: row.size ?? 0 }
     : row.op === "rename"
       ? { ...base, op: "rename", from: row.from_path ?? row.path, path: row.path, ...(row.etag ? { etag: row.etag } : {}), ...(row.size === null ? {} : { size: row.size }) }
-      : { ...base, op: "delete", path: row.path };
+      : { ...base, op: "delete", path: row.path, ...(row.etag ? { etag: row.etag } : {}) };
   return {
     ...event,
     broadcastState: row.broadcast_state === "published" ? "published" : "pending" as BroadcastState,
@@ -145,7 +145,7 @@ export class SqlMutationStore implements MutationStore {
       event.op,
       event.path,
       event.op === "rename" ? event.from : null,
-      event.op === "put" ? event.etag : event.op === "rename" ? event.etag ?? null : null,
+      event.op === "put" ? event.etag : event.etag ?? null,
       event.op === "put" ? event.size : event.op === "rename" ? event.size ?? null : null,
       event.committedAt,
       createdAt,

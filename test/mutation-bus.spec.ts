@@ -104,16 +104,18 @@ describe("Mutation bus: Obsidian ingress", () => {
     const vault = vaultFor(journal, gateway.publisher);
     const ingress = createMutationIngress({ MINERAL: bindings().MINERAL, MUTATION_INGRESS_TOKEN: "t" }, journal, vault.service.mutations);
 
-    // The plugin performs its own conditional R2 write, then reports it.
+    // The plugin performs its own conditional R2 write, then reports it. `committedAt` is when the
+    // change landed, so the debounce window is measured from the write, not from the drain.
     const key = "bus/obsidian-note.md";
     const put = (await bindings().MINERAL.put(key, encoder.encode("# from obsidian\n")))!;
-    const accepted = await ingress.record({ id: "mut_obsidian_report", source: "obsidian", op: "put", path: key, etag: put.etag, size: 17, committedAt: 1_000 });
+    const committedAt = Date.now();
+    const accepted = await ingress.record({ id: "mut_obsidian_report", source: "obsidian", op: "put", path: key, etag: put.etag, size: 17, committedAt });
 
     expect(accepted).toMatchObject({ status: "accepted", seq: 1 });
-    expect(store.snapshotJournal()[0]).toMatchObject({ id: "mut_obsidian_report", source: "obsidian", op: "put", path: key });
+    expect(store.snapshotJournal()[0]).toMatchObject({ id: "mut_obsidian_report", source: "obsidian", op: "put", path: key, committedAt });
 
     // A retry of the same report is idempotent and adds nothing.
-    await expect(ingress.record({ id: "mut_obsidian_report", source: "obsidian", op: "put", path: key, etag: put.etag, size: 17, committedAt: 1_000 }))
+    await expect(ingress.record({ id: "mut_obsidian_report", source: "obsidian", op: "put", path: key, etag: put.etag, size: 17, committedAt }))
       .resolves.toMatchObject({ status: "duplicate", seq: 1 });
     expect(store.snapshotJournal()).toHaveLength(1);
 
@@ -124,7 +126,7 @@ describe("Mutation bus: Obsidian ingress", () => {
     expect(gateway.generations()).toBe(1);
 
     // ...and exactly one apply happens once the window closes.
-    const later = await drainDueIndex({ journal, indexer: indexer.indexer, now: () => Date.now() + 60_000 });
+    const later = await drainDueIndex({ journal, indexer: indexer.indexer, now: () => committedAt + 31_000 });
     expect(later).toMatchObject({ applied: 1 });
     expect(indexer.calls).toEqual([{ path: key, action: "upsert" }]);
     expect(gateway.generations()).toBe(1);
@@ -141,7 +143,7 @@ describe("Mutation bus: Obsidian ingress", () => {
     const key = "bus/echo.md";
     const remote = (await bindings().MINERAL.put(key, encoder.encode("from device A")))!;
     const ingress = createMutationIngress({ MINERAL: bindings().MINERAL, MUTATION_INGRESS_TOKEN: "t" }, journal, vault.service.mutations);
-    await ingress.record({ id: "mut_device_a", source: "obsidian", op: "put", path: key, etag: remote.etag, size: 12, committedAt: 1_000 });
+    await ingress.record({ id: "mut_device_a", source: "obsidian", op: "put", path: key, etag: remote.etag, size: 12, committedAt: Date.now() });
 
     // Device B downloads the bytes and applies them locally. That apply is not a fact, and the
     // ingress route must not be told otherwise — even if a client tries, its id would be new but
@@ -153,6 +155,8 @@ describe("Mutation bus: Obsidian ingress", () => {
     // Exactly one journal fact and exactly one generation for device A's write.
     expect(store.snapshotJournal()).toHaveLength(1);
     expect(gateway.generations()).toBe(1);
+    // The ingest is debounced (source=obsidian), so it is owed but not yet due: nothing is indexed
+    // during the window, and the count of facts is unaffected either way.
     expect(indexer.calls).toHaveLength(0);
   });
 

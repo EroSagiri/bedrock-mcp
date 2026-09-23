@@ -31,6 +31,15 @@ export type PutMutation = MutationBase & {
 export type DeleteMutation = MutationBase & {
   op: "delete";
   path: string;
+  /**
+   * The revision the writer retired.
+   *
+   * A hard delete that removed the object reports nothing here and is verified by "the object is
+   * gone". A **logical** delete — an immutable tombstone with the object left in place so the
+   * deletion stays recoverable — reports the revision it retired, which is the only way such a
+   * report can be checked against R2 at all.
+   */
+  etag?: string;
 };
 
 /**
@@ -66,7 +75,9 @@ export function isMutationEvent(value: unknown): value is MutationEvent {
       && typeof event.etag === "string" && event.etag.length > 0 && event.etag.length <= 256
       && typeof event.size === "number" && Number.isFinite(event.size) && event.size >= 0;
   }
-  if (event.op === "delete") return validPath(event.path);
+  if (event.op === "delete") {
+    return validPath(event.path) && (event.etag === undefined || typeof event.etag === "string" && event.etag.length > 0 && event.etag.length <= 256);
+  }
   if (event.op === "rename") {
     return validPath(event.from) && validPath(event.path)
       && (event.etag === undefined || typeof event.etag === "string" && event.etag.length <= 256)

@@ -88,6 +88,11 @@ export class VaultIndex extends DurableObject<Env> {
     return this.mutations.findByMutationId(mutationId);
   }
 
+  /** The consumer-facing name for the same lookup; the RPC port calls it `findByMutationId`. */
+  async findByMutationId(mutationId: string): Promise<JournalEntry | null> {
+    return this.mutations.findByMutationId(mutationId);
+  }
+
   // ---------------------------------------------------------------------------------------------
   // Sync Publisher: outbox reads and delivery bookkeeping.
   // ---------------------------------------------------------------------------------------------
