@@ -90,7 +90,12 @@ export default class VaultEntrypoint extends WorkerEntrypoint<VaultWorkerEnv> {
     const results = await this.service().documents.delete(keys, { source: "mcp" });
     const list = Array.isArray(results) ? results : [results];
     for (const result of list) this.ctx.waitUntil(this.afterWrite(result, { op: "delete", path: result.key, etag: result.etag }));
-    return { deleted: list.map(result => result.key), etags: list.map(result => result.etag ?? null), mutationPending: list.some(result => result.mutationPending) };
+    return {
+      deleted: list.map(result => result.key),
+      etags: list.map(result => result.etag ?? null),
+      mutations: list.map(result => ({ mutationId: result.mutationId, mutationSeq: result.mutationSeq, mutationPending: result.mutationPending })),
+      mutationPending: list.some(result => result.mutationPending),
+    };
   }
 
   async backupTextDocument(key: string, text: string, contentType?: string): Promise<string> {

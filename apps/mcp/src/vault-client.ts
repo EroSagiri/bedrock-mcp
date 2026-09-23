@@ -44,14 +44,82 @@ export type VaultClient = {
   };
   /** `null` when the Vault predates the mutation journal and cannot record a committed write. */
   recordCommittedMutation(input: CommittedMutationInput): Promise<RecordCommittedMutationResult | null>;
+  /** Facts this client has not managed to get recorded yet. Diagnostics and tests only. */
+  pendingMutations(): CommittedMutationInput[];
+  /** Re-submits every outstanding fact. Never writes R2 — a fact is recorded, never re-executed. */
+  flushOutstanding(): Promise<void>;
 };
 
 function metadata(document: VaultRpcDocumentMetadata): VaultDocumentMetadata {
   return { ...document, uploaded: new Date(document.uploaded) };
 }
 
-export function createVaultClient(rpc: VaultRpc): VaultClient {
+/**
+ * A write's report about its own mutation record.
+ *
+ * `mutationPending` means the bytes are durable in R2 but the fact did not reach the journal, so the
+ * gateway and the index have not been told. The write succeeded; the record is outstanding.
+ */
+type MutationRecordReport = { mutationId: string; mutationPending: boolean };
+
+/** How many times the client re-submits an outstanding fact on top of the Vault's own repair. */
+const REPAIR_ATTEMPTS = 2;
+const REPAIR_BACKOFF_MS = 250;
+
+export type VaultClientDependencies = {
+  /** Called once per fact the client could not get recorded. Diagnostics, never control flow. */
+  onRepairFailed?(message: string): void;
+  repairAttempts?: number;
+};
+
+export function createVaultClient(rpc: VaultRpc, dependencies: VaultClientDependencies = {}): VaultClient {
+  const attempts = dependencies.repairAttempts ?? REPAIR_ATTEMPTS;
+  /**
+   * Facts this client could not get recorded.
+   *
+   * The Vault retries its own repair after the response, and this is the second half of the same
+   * invariant at the only place that still holds the information: the caller. A command leaves them
+   * here; a later write flushes them before doing anything else. Nothing here ever writes R2 — a fact
+   * is re-submitted, never re-executed.
+   */
+  const outstanding = new Map<string, CommittedMutationInput>();
+
+  async function submit(fact: CommittedMutationInput): Promise<boolean> {
+    if (!rpc.recordCommittedMutation) {
+      dependencies.onRepairFailed?.(`mutation repair unsupported id=${fact.id}`);
+      return false;
+    }
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      try {
+        const recorded = await rpc.recordCommittedMutation(fact);
+        if (recorded?.recorded !== false) {
+          outstanding.delete(fact.id);
+          return true;
+        }
+      } catch {
+        // A transport failure says nothing about whether the fact landed; the id makes a retry safe.
+      }
+      if (attempt + 1 < attempts) await new Promise(resolve => setTimeout(resolve, REPAIR_BACKOFF_MS));
+    }
+    outstanding.set(fact.id, fact);
+    dependencies.onRepairFailed?.(`mutation repair outstanding id=${fact.id} pending=${outstanding.size}`);
+    return false;
+  }
+
+  /** The second half of `mutationPending`: the caller hands the fact back instead of writing again. */
+  async function repairAfterWrite(report: MutationRecordReport, fact: Omit<CommittedMutationInput, "id" | "committedAt">): Promise<void> {
+    if (!report.mutationPending) return;
+    // The fact keeps the write's own time, so a debounce window is measured from the write.
+    await submit({ ...fact, id: report.mutationId, committedAt: Date.now() } as CommittedMutationInput);
+  }
+
+  async function flushOutstanding(): Promise<void> {
+    for (const fact of [...outstanding.values()]) await submit(fact);
+  }
+
   return {
+    /** Facts still waiting for the journal. Test and diagnostic surface only. */
+    pendingMutations: () => [...outstanding.values()],
     documents: {
       async get(key) {
         const document = await rpc.getDocument(key);
@@ -73,9 +141,31 @@ export function createVaultClient(rpc: VaultRpc): VaultClient {
         const input = typeof inputOrKey === "string"
           ? { key: inputOrKey, bytes: bytes!, contentType: options?.httpMetadata?.contentType, customMetadata: options?.customMetadata }
           : inputOrKey;
-        return rpc.putDocument(input);
+        // A write is the natural moment to make good on an earlier outstanding fact.
+        await flushOutstanding();
+        const written = await rpc.putDocument(input);
+        await repairAfterWrite(written, { source: "mcp", op: "put", path: input.key, etag: written.etag, size: written.size });
+        return written;
       },
-      async delete(keys) { return rpc.deleteDocuments(keys); },
+      async delete(keys) {
+        await flushOutstanding();
+        const deleted = await rpc.deleteDocuments(keys);
+        await Promise.all(deleted.deleted.map(async (key, index) => {
+          const reference = deleted.mutations[index];
+          if (!reference?.mutationPending) return;
+          // The same fact, with the id the Vault minted before the delete: the file is already gone,
+          // so this records the removal and never re-runs it.
+          await submit({
+            id: reference.mutationId,
+            source: "mcp",
+            op: "delete",
+            path: key,
+            ...(deleted.etags[index] ? { etag: deleted.etags[index]! } : {}),
+            committedAt: Date.now(),
+          });
+        }));
+        return deleted;
+      },
       async backupText(key, text, contentType) { return rpc.backupTextDocument(key, text, contentType); },
       async move(from, to) { await rpc.moveDocument(from, to); },
     },
@@ -94,6 +184,7 @@ export function createVaultClient(rpc: VaultRpc): VaultClient {
       if (!rpc.recordCommittedMutation) return null;
       return rpc.recordCommittedMutation(input);
     },
+    flushOutstanding,
   };
 }
 

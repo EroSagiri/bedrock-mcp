@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { createVaultClient } from "../apps/mcp/src/vault-client";
 import { createVaultService } from "../apps/vault/src/service";
 import { MemoryMutationStore } from "../apps/vault/src/index/memory-store";
 import { journalFromStore, type MutationJournal, type MutationStore } from "../apps/vault/src/mutation/store";
@@ -262,5 +263,67 @@ describe("the journal contract the repair relies on", () => {
     expect(second.inserted).toBe(false);
     expect(second.seq).toBe(first.seq);
     expect(store.findByMutationId(event.id)?.seq).toBe(first.seq);
+  });
+});
+
+/**
+ * The whole chain the invariant is about, with the real Vault RPC in the loop:
+ *
+ * ```text
+ * MCP write → R2 landed → journal fails → mutationPending: true
+ *           → the caller hands the fact back (same id) → journal holds it, R2 written once
+ * ```
+ */
+describe("MCP-side repair against the real Vault RPC", () => {
+  it("records the fact through the documented flow and never writes twice", async () => {
+    await (vaultIndex() as unknown as { resetMutationState(): Promise<void> }).resetMutationState();
+    const key = "repair/mcp-chain.md";
+    // The same client the MCP tools use, talking to the deployed entrypoint.
+    const vault = createVaultClient(vaultEntrypoint());
+
+    const written = await vault.documents.put(key, encoder.encode("one write"));
+    expect(written.mutationPending).toBe(false);
+    expect(written.mutationId).toMatch(/^mut_/);
+    expect(vault.pendingMutations()).toEqual([]);
+
+    // Only one object exists, and it is the one this flow wrote.
+    const listed = await bindings().MINERAL.list({ prefix: key });
+    expect(listed.objects).toHaveLength(1);
+    await expect((vaultIndex() as unknown as { findMutation(id: string): Promise<unknown> }).findMutation(written.mutationId))
+      .resolves.toMatchObject({ path: key, op: "put", etag: written.etag });
+  });
+
+  it("re-submits a fact the Vault could not record, and the record is the Vault's own", async () => {
+    await (vaultIndex() as unknown as { resetMutationState(): Promise<void> }).resetMutationState();
+    const key = "repair/mcp-chain-2.md";
+    const real = vaultEntrypoint();
+    // A Vault whose write reports `mutationPending` after R2 committed, as a journal blip would. The
+    // stub's methods are copied onto a plain object (an RPC argument cannot be a loopback stub, and
+    // the client hands the stub itself to `recordCommittedMutation`), and only then is `putDocument`
+    // overridden.
+    let writes = 0;
+    const flaky: typeof real = {} as typeof real;
+    for (const property of Object.keys(real) as Array<keyof typeof real>) {
+      const value = real[property];
+      if (typeof value !== "function") continue;
+      Object.defineProperty(flaky, property, {
+        value: (...args: unknown[]) => (value as (...inner: unknown[]) => unknown).apply(real, args),
+      });
+    }
+    flaky.putDocument = async input => {
+      writes++;
+      const result = await real.putDocument(input);
+      return writes === 1 ? { ...result, mutationSeq: -1, mutationPending: true } : result;
+    };
+    const vault = createVaultClient(flaky, { repairAttempts: 1 });
+
+    const written = await vault.documents.put(key, encoder.encode("blip"));
+    expect(writes).toBe(1);
+    // The client handed the fact back with the id the Vault minted, so the journal holds it — which is
+    // exactly what a later `refresh()` would otherwise have to reconstruct from R2.
+    await expect((vaultIndex() as unknown as { findMutation(id: string): Promise<unknown> }).findMutation(written.mutationId))
+      .resolves.toMatchObject({ id: written.mutationId, path: key, op: "put", etag: written.etag });
+    expect(vault.pendingMutations()).toEqual([]);
+    expect((await bindings().MINERAL.list({ prefix: key })).objects).toHaveLength(1);
   });
 });

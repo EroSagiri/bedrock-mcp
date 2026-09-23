@@ -26,22 +26,35 @@ export type PutDocumentInput = {
 };
 
 /**
- * The revision a write committed, plus the journal fact that records it.
+ * The journal fact a committed write produced.
  *
- * `mutationPending` means R2 committed but the mutation fact could not be written; a caller that
- * cares about downstream delivery can retry the same operation, which is idempotent by
- * `mutationId`.
+ * It is the whole repair payload: a caller that saw `mutationPending` can hand these four fields back
+ * to `recordCommittedMutation`, with the same id, and never re-execute the write.
  */
-export type PutDocumentResult = {
-  etag: string;
-  size: number;
+export type MutationReference = {
   mutationId: string;
   mutationSeq: number;
+  /** `true` when R2 committed but the fact did not; the caller should hand it back. */
   mutationPending: boolean;
+};
+
+/**
+ * The revision a write committed, plus the journal fact that records it.
+ */
+export type PutDocumentResult = MutationReference & {
+  etag: string;
+  size: number;
 };
 
 export type DeleteDocumentsResult = {
   deleted: string[];
+  /**
+   * One reference per deleted key, in the same order as `deleted`.
+   *
+   * It is per key rather than one flag for the batch because a repair must reuse the id of the fact
+   * that actually failed, and a batch can fail for one key and not another.
+   */
+  mutations: MutationReference[];
   /** The revision each object held when it was removed, in the same order as `deleted`. */
   etags: Array<string | null>;
   mutationPending: boolean;
