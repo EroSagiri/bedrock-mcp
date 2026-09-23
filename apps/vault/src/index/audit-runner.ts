@@ -19,10 +19,22 @@ export type AuditRun = {
   pendingLeft: number;
 };
 
-/** How many pages one run may walk. It bounds a single invocation, not the audit: the next run resumes. */
-export const AUDIT_PAGE_LIMIT = 25;
-/** How much dirty-set debt one page may clear, so a big audit does not starve a live write. */
-export const AUDIT_DRAIN_PER_PAGE = 8;
+/**
+ * How many pages one run may walk.
+ *
+ * An R2 list page is large enough that a vault this size is a handful of pages, so this bounds a
+ * pathological case (a wrong cursor) rather than normal work.
+ */
+export const AUDIT_PAGE_LIMIT = 200;
+/**
+ * How many documents one page may get indexed behind it.
+ *
+ * This is the throttle that matters, and it is deliberately much larger than the per-request drain: an
+ * audit's whole purpose is to clear a backlog, and a first-time backfill that only advances eight
+ * documents per page would take dozens of runs. A live write still takes precedence because it is
+ * enqueued with `not_before = now` and the drain is oldest-first.
+ */
+export const AUDIT_DRAIN_PER_PAGE = 32;
 
 /**
  * Runs a revision audit and drives the indexer over what it enqueued.

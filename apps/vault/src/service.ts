@@ -91,6 +91,7 @@ export type VaultDocuments = {
 
 export type VaultIndexService = {
   query(kind: string, input: Record<string, unknown>): Promise<Record<string, unknown>>;
+  /** Starts a revision audit on the index and returns its state. */
   refresh(): Promise<Record<string, unknown>>;
 };
 
@@ -259,3 +260,4 @@ export function createVaultService(env: VaultEnv, options: { journal?: MutationJ
     },
   };
 }
+

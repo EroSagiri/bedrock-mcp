@@ -37,18 +37,12 @@ export class VaultIndex extends DurableObject<Env> {
     super(ctx, env);
     this.db = this.ctx.storage.sql as unknown as SqlDatabase;
     this.mutations = new SqlMutationStore(this.db);
-    ctx.storage.sql.exec(`
-      CREATE TABLE IF NOT EXISTS index_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS documents (generation INTEGER NOT NULL, key TEXT NOT NULL, etag TEXT NOT NULL, modified TEXT NOT NULL, size INTEGER NOT NULL, content_type TEXT, PRIMARY KEY (generation, key));
-      CREATE TABLE IF NOT EXISTS frontmatter_values (generation INTEGER NOT NULL, document_key TEXT NOT NULL, field TEXT NOT NULL, value TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS document_tags (generation INTEGER NOT NULL, document_key TEXT NOT NULL, tag TEXT NOT NULL, source TEXT NOT NULL, occurrences INTEGER NOT NULL, PRIMARY KEY (generation, document_key, tag, source));
-      CREATE TABLE IF NOT EXISTS links (generation INTEGER NOT NULL, from_key TEXT NOT NULL, to_key TEXT NOT NULL, PRIMARY KEY (generation, from_key, to_key));
-      CREATE TABLE IF NOT EXISTS refresh_seen (generation INTEGER NOT NULL, key TEXT NOT NULL, PRIMARY KEY (generation, key));
-      CREATE INDEX IF NOT EXISTS documents_generation_modified ON documents(generation, modified DESC);
-      CREATE INDEX IF NOT EXISTS tags_generation_tag ON document_tags(generation, tag);
-      CREATE INDEX IF NOT EXISTS links_generation_to ON links(generation, to_key);
-      CREATE INDEX IF NOT EXISTS frontmatter_generation_field ON frontmatter_values(generation, field, value);
-    `);
+    // Only `index_meta` is created eagerly: it holds the migration marker, and it is the one table the
+    // live schema never redefines. The generation-era tables are deliberately *not* created here — an
+    // install that predates the live index still has them, and `migrateToLiveIndex` drops them before
+    // the live schema is applied. Creating them first would recreate tables the migration is about to
+    // discard, and leave their old indexes behind to collide with the new ones.
+    this.db.exec("CREATE TABLE IF NOT EXISTS index_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
     this.migrateToLiveIndex();
   }
 
