@@ -2,8 +2,15 @@ import type { ParsedDocument } from "../index/parse";
 import { CHUNK_MAX_CHARS, CHUNK_OVERLAP_CHARS, CHUNK_TARGET_CHARS, VECTOR_SCHEMA } from "./schema";
 import { sha256Base64Url } from "./sha256";
 
+/** A chunk as the chunker produces it: text and structure, with no identity yet. */
+export type ChunkDraft = {
+  ordinal: number;
+  heading: string;
+  text: string;
+};
+
 /**
- * One embeddable piece of a document.
+ * One embeddable piece of a document, identified.
  *
  * `chunkId` is a **content-addressed physical identity**: it is a digest of the canonical identity
  * (document, content hash, chunker, model, vector schema version, ordinal), not a readable string. Two
@@ -11,12 +18,18 @@ import { sha256Base64Url } from "./sha256";
  * worker cannot overwrite a published revision; and changing the chunker or the model produces a
  * different id space rather than silently reusing ids whose vectors came from a different function.
  */
-export type Chunk = {
-  ordinal: number;
-  heading: string;
-  text: string;
+export type Chunk = ChunkDraft & {
   chunkId: string;
   contentSha256: string;
+};
+
+/** Everything a chunk id depends on. All of it is known before the publish transaction opens. */
+export type ChunkIdentity = {
+  documentId: number;
+  contentSha256: string;
+  chunkerVersion?: number;
+  embeddingModel?: string;
+  vectorVersion?: number;
 };
 
 /** Canonical, length-prefixed so no combination of field values can collide with another. */
@@ -40,15 +53,15 @@ export function canonicalChunkIdentity(input: {
   ].join("|");
 }
 
-export function chunkIdFor(input: {
-  documentId: number;
-  contentSha256: string;
-  chunkerVersion?: number;
-  embeddingModel?: string;
-  vectorVersion?: number;
-  ordinal: number;
-}): string {
-  const digest = sha256Base64Url(canonicalChunkIdentity({
+/**
+ * The id of one chunk, as an awaited digest.
+ *
+ * It is deliberately asynchronous and deliberately called **before** the transaction: the transaction
+ * is synchronous, so an id it writes has to exist already. That ordering is what keeps the identity
+ * derivation out of the critical section, and out of the runtime's synchronous-hash problem.
+ */
+export async function chunkIdFor(input: ChunkIdentity & { ordinal: number }): Promise<string> {
+  const digest = await sha256Base64Url(canonicalChunkIdentity({
     documentId: input.documentId,
     contentSha256: input.contentSha256,
     chunkerVersion: input.chunkerVersion ?? VECTOR_SCHEMA.chunkerVersion,
@@ -143,30 +156,37 @@ export function embeddingText(parsed: ParsedDocument, chunk: { heading: string; 
 }
 
 /**
- * Chunks one document. The same input always produces the same chunks, because the chunk id depends on
- * the content hash rather than on when the work ran.
+ * Chunks one document, structurally.
+ *
+ * It depends on the text only, so the same document always produces the same drafts: the identity that
+ * makes them addressable is added afterwards, from the content hash rather than from when the work ran.
  */
-export function chunkDocument(parsed: ParsedDocument, options: { documentId: number; contentSha256: string }): Chunk[] {
-  const chunks: Chunk[] = [];
+export function chunkDocument(parsed: ParsedDocument): ChunkDraft[] {
+  const chunks: ChunkDraft[] = [];
   let ordinal = 0;
   for (const section of sectionsOf(parsed)) {
     for (const piece of groupParagraphs(paragraphsOf(section.body))) {
       if (!piece.trim()) continue;
-      chunks.push({
-        ordinal,
-        heading: section.heading,
-        text: piece.trim(),
-        contentSha256: options.contentSha256,
-        chunkId: chunkIdFor({ documentId: options.documentId, contentSha256: options.contentSha256, ordinal }),
-      });
+      chunks.push({ ordinal, heading: section.heading, text: piece.trim() });
       ordinal++;
     }
   }
   // A document with no body still deserves one chunk, so its title is searchable.
-  if (chunks.length === 0) {
-    const text = parsed.title.trim();
-    chunks.push({ ordinal: 0, heading: parsed.title, text, contentSha256: options.contentSha256, chunkId: chunkIdFor({ documentId: options.documentId, contentSha256: options.contentSha256, ordinal: 0 }) });
-  }
+  if (chunks.length === 0) chunks.push({ ordinal: 0, heading: parsed.title, text: parsed.title.trim() });
   return chunks;
+}
+
+/**
+ * Turns drafts into identified chunks, before the transaction and before embedding.
+ *
+ * One awaited digest per chunk. Doing it here rather than inside the write means the ids are already
+ * fixed when the transaction opens, so nothing inside it has to hash anything.
+ */
+export async function assignChunkIds(drafts: ChunkDraft[], identity: ChunkIdentity): Promise<Chunk[]> {
+  return Promise.all(drafts.map(async draft => ({
+    ...draft,
+    contentSha256: identity.contentSha256,
+    chunkId: await chunkIdFor({ ...identity, ordinal: draft.ordinal }),
+  })));
 }
 

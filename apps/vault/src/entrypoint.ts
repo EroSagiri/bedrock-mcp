@@ -20,6 +20,7 @@ import { createGatewayPublisher, type GatewayRpcBinding } from "./sync-publisher
 import { drainSyncOutbox } from "./sync-publisher/publisher";
 import { drainDueIndex } from "./index/scheduler";
 import { runIndexAudit, type AuditIndex, type AuditRun } from "./index/audit-runner";
+import { runEmbeddingProbe, type EmbeddingBinding } from "./vector/embedding";
 
 /** The nightly audit schedule, in UTC: 19:30 UTC is 03:30 at +08:00. */
 export const NIGHTLY_AUDIT_CRON = "30 19 * * *";
@@ -49,6 +50,13 @@ export { VaultIndex } from "./durable/vault-index";
 export type VaultWorkerEnv = {
   MINERAL: R2Bucket;
   VAULT_INDEX: DurableObjectNamespace<VaultIndex>;
+  /**
+   * Workers AI, for embeddings.
+   *
+   * Optional so a deployment without the binding still boots: everything except the semantic search
+   * path works, and the probe reports the binding as missing rather than failing to start.
+   */
+  AI?: EmbeddingBinding;
   MUTATION_INGRESS_TOKEN?: string;
   SYNC_GATEWAY?: GatewayRpcBinding;
   SYNC_GATEWAY_URL?: string;
@@ -193,6 +201,17 @@ export default class VaultEntrypoint extends WorkerEntrypoint<VaultWorkerEnv> {
       detail: created.ok ? (written.ok ? (matched.ok ? "fts5 available" : `match failed: ${matched.error}`) : `insert failed: ${written.error}`) : `create failed: ${created.error}`,
       cleanedUp: dropped.ok,
     };
+  }
+
+  /**
+   * Measures the embedding model instead of trusting its documentation.
+   *
+   * A Vectorize index is created with a width and a metric and can never change them, so the real output
+   * width has to be known before the index exists. This asks the deployed binding, through the same
+   * binding the publish path will use.
+   */
+  async probeEmbeddingModel(model?: string): Promise<Record<string, unknown>> {
+    return { ...(await runEmbeddingProbe(this.env.AI, model)) };
   }
 
   /**

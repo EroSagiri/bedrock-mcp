@@ -18,6 +18,7 @@
   "r2_buckets": [
     { "binding": "MINERAL", "bucket_name": "mineral" }
   ],
+  "ai": { "binding": "AI" },
   "services": [
     {
       "binding": "SYNC_GATEWAY",

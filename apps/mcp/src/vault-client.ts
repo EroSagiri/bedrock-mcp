@@ -42,6 +42,8 @@ export type VaultClient = {
     query(kind: string, input: Record<string, unknown>): Promise<Record<string, unknown>>;
     refresh(): Promise<Record<string, unknown>>;
   };
+  /** `null` when the Vault predates the embedding binding and cannot answer the probe at all. */
+  probeEmbeddingModel(model?: string): Promise<Record<string, unknown> | null>;
   /** `null` when the Vault predates the mutation journal and cannot record a committed write. */
   recordCommittedMutation(input: CommittedMutationInput): Promise<RecordCommittedMutationResult | null>;
   /** Facts this client has not managed to get recorded yet. Diagnostics and tests only. */
@@ -172,6 +174,10 @@ export function createVaultClient(rpc: VaultRpc, dependencies: VaultClientDepend
     index: {
       async query(kind, input) { return rpc.queryIndex(kind, input); },
       async refresh() { return rpc.refreshIndex(); },
+    },
+    async probeEmbeddingModel(model) {
+      if (!rpc.probeEmbeddingModel) return null;
+      return rpc.probeEmbeddingModel(model);
     },
     /**
      * The repair half of a write.

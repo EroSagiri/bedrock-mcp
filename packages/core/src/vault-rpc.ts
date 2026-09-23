@@ -109,6 +109,14 @@ export type VaultRpc = {
   queryIndex(kind: string, input: Record<string, unknown>): Promise<Record<string, unknown>>;
   refreshIndex(): Promise<Record<string, unknown>>;
   /**
+   * Asks the deployed Vault how wide the embedding model's vectors really are.
+   *
+   * It is an operator diagnostic, and it is optional for the same reason `recordCommittedMutation` is:
+   * a Vault with no AI binding cannot answer it, and that is a fact about the deployment rather than a
+   * client error. The width is immutable once a Vectorize index exists, so this runs before creation.
+   */
+  probeEmbeddingModel?(model?: string): Promise<Record<string, unknown>>;
+  /**
    * Optional because it is only meaningful to a caller that saw `mutationPending: true`; a Vault that
    * predates the mutation journal simply does not implement it.
    */

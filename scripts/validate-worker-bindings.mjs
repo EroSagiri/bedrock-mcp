@@ -68,11 +68,16 @@ for (const [document, bindingName, className, label] of [
 // The publisher derives the gateway channel from these, so a missing value disables the broadcast.
 for (const key of ["MINERAL_R2_ENDPOINT", "MINERAL_BUCKET", "MINERAL_REMOTE_PREFIX"]) {
   check(typeof vault.vars?.[key] === "string", `vault: vars.${key} must be set (the publisher derives its channel from them)`);
-}
-check(
+}check(
   typeof vault.vars?.MINERAL_R2_ENDPOINT === "string" && /^https:\/\//i.test(vault.vars.MINERAL_R2_ENDPOINT) && !/example\.r2\.cloudflarestorage\.com$/i.test(new URL(vault.vars.MINERAL_R2_ENDPOINT).hostname),
   "vault: vars.MINERAL_R2_ENDPOINT must be the real R2 endpoint (a placeholder would derive a channel nobody subscribes to)",
 );
+
+// The Vault is the only Worker that embeds: the vector index is built from what it committed, so the
+// AI binding belongs here. A deployment without it does not fail loudly — the probe answers
+// "ai-binding-missing" and semantic search stays empty — which is why it is checked statically.
+check(vault.ai?.binding === "AI", "vault: must declare the Workers AI binding as AI (the embedding probe and the vector index depend on it)");
+check(!(mcp.ai ?? gateway.ai), "mcp/gateway: must not hold an AI binding (only the Vault embeds)");
 
 if (failures.length > 0) {
   console.error("worker binding validation failed:");

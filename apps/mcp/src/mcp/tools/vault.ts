@@ -10,6 +10,29 @@ import { indexQuery, readModeSchemaDescription, refreshIndex } from "../index-cl
 import { assertTextKey, backupTextObject, err, keyError, moveObject, ok, stripTextExt, trashKey, wikilinkReplacement, type McpRegistrationContext } from "../shared";
 
 export function registerVaultTools(ctx: McpRegistrationContext): void {
+    /**
+     * The one tool whose job is to measure rather than to report.
+     *
+     * A Vectorize index keeps its width and metric forever, so the width has to come from the deployed
+     * model instead of from documentation. It is registered here, next to the index tools, because it
+     * answers the same kind of question: what can this deployment actually do?
+     */
+    registerToolCompat(ctx.server,
+      "vault_embedding_probe",
+      {
+        inputSchema: {
+          model: z.string().optional().describe("要探测的模型；默认使用冻结的向量模型"),
+        },
+      },
+      async ({ model }) => {
+        const result = await ctx.env.vault.probeEmbeddingModel(model);
+        if (!result) return err("此 Vault 未配置 AI binding，无法回答向量宽度");
+        return result.matchesExpectedDimensions
+          ? ok(JSON.stringify(result, null, 2))
+          : err(JSON.stringify(result, null, 2));
+      }
+    );
+
     registerToolCompat(ctx.server,
       "vault_index_refresh",
       {

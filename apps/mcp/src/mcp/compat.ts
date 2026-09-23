@@ -214,6 +214,12 @@ const TOOL_METADATA: Record<string, {
     title: "Refresh vault metadata index",
     description: "Start or resume a rebuild of the eventual-consistency Vault Metadata Index.",
   },
+  vault_embedding_probe: {
+    category: "vault",
+    risk: "read",
+    title: "Probe the embedding model",
+    description: "Measure the deployed embedding model's real vector width, so a Vectorize index is created at the right size.",
+  },
 };
 
 function annotationsFor(risk: ToolRisk, title: string): ToolAnnotations {
