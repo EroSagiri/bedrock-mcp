@@ -18,14 +18,34 @@ const mcp = await connect();
 console.log(`endpoint=${mcp.safeEndpoint}`);
 console.log(`initialize → ${mcp.serverInfo}`);
 
+/**
+ * One audit run.
+ *
+ * A run is long — it walks R2 and clears a batch of documents in two indexes — and it talks to a
+ * Durable Object the platform is free to evict underneath it. Both a tool error and a dropped
+ * connection are therefore normal here, and an audit is resumable: `startIndexAudit` reports the walk
+ * already in progress and its cursor picks up where it stopped. So a run is retried, and the run
+ * counter only advances on a run that produced numbers.
+ */
+async function runAudit(run) {
+  let lastError;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const refresh = await mcp.callTool("vault_index_refresh");
+      if (!refresh.isError) return JSON.parse(refresh.text);
+      lastError = refresh.text.trim();
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+    if (attempt < 3) await new Promise(resolve => setTimeout(resolve, 3000 * attempt));
+  }
+  console.error(`run ${run}: vault_index_refresh failed after 3 attempts\n${lastError}`);
+  process.exit(1);
+}
+
 let last = null;
 for (let run = 1; run <= maxRuns; run++) {
-  const refresh = await mcp.callTool("vault_index_refresh");
-  if (refresh.isError) {
-    console.error(`run ${run}: vault_index_refresh failed\n${refresh.text}`);
-    process.exit(1);
-  }
-  const audit = JSON.parse(refresh.text);
+  const audit = await runAudit(run);
   last = audit;
   console.log(
     `run ${run}: pages=${audit.pages} scanned=${audit.scanned} ` +

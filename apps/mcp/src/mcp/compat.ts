@@ -224,7 +224,7 @@ const TOOL_METADATA: Record<string, {
     category: "search",
     risk: "read",
     title: "Semantic search",
-    description: "Search notes by meaning, using the vector index. Complements full-text search rather than replacing it.",
+    description: "Search notes by meaning, using the vector index. Complements full-text search rather than replacing it, and is eventually consistent: a note written seconds ago is found by search_text before it is found here.",
   },
 };
 

@@ -64,9 +64,11 @@ export function registerSearchTools(ctx: McpRegistrationContext): void {
     registerToolCompat(ctx.server,
       "search_semantic",
       {
-        query: z.string().min(1).describe("自然语言查询；按语义而非字面匹配"),
-        limit: z.number().int().min(1).max(50).optional(),
-        prefix: z.string().optional().describe("只在该路径前缀内检索，例如 'daily/'"),
+        inputSchema: {
+          query: z.string().min(1).describe("自然语言查询；按语义而非字面匹配"),
+          limit: z.number().int().min(1).max(50).optional(),
+          prefix: z.string().optional().describe("只在该路径前缀内检索，例如 'daily/'"),
+        },
       },
       async ({ query, limit, prefix }) => {
         const result = await ctx.env.vault.searchSemantic({ query, limit, prefix });

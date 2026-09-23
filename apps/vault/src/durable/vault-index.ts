@@ -704,6 +704,12 @@ export class VaultIndex extends DurableObject<Env> {
    * caller; everything after it must be inside the Durable Object, because the acceptance rule reads the
    * ledger. Vectorize is asked for more candidates than the caller wants: the rule can refuse a
    * candidate, and a refusal that was never retrieved cannot be replaced.
+   *
+   * One property cannot be engineered away here: **Vectorize is itself eventually consistent**, so a
+   * chunk published a moment ago may not be retrievable yet — measured in tens of seconds in production,
+   * for deletions as well as insertions. A caller that has just written and needs an immediate answer
+   * wants the full-text search, which is exact the moment the note index commits; this one catches up on
+   * its own.
    */
   async searchSemantic(input: { vector: number[]; limit: number; prefix: string }): Promise<Row> {
     const revision = { chunkerVersion: VECTOR_SCHEMA.chunkerVersion, embeddingModel: VECTOR_SCHEMA.model, vectorVersion: VECTOR_SCHEMA.version };
