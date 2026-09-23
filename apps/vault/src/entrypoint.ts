@@ -9,12 +9,13 @@ import type {
   VaultRpcDocumentMetadata,
 } from "@mineral/core/vault-rpc";
 import { createVaultService, type VaultDocumentMetadata, type VaultService, type VaultWriteResult } from "./service";import type { VaultIndex } from "./durable/vault-index";
-import { createMutationIngress, handleJournalStateRequest, handleMutationIngressRequest } from "./mutation/http";
+import { createMutationIngress, handleJournalStateRequest, handleMutationIngressRequest, MutationIngressError } from "./mutation/http";
 import { parseCommittedMutation, recordCommittedMutationUntilRecorded, REPAIR_ATTEMPTS, type CommittedMutationInput } from "./mutation/committed";
 import { mutationLog } from "./mutation/ids";
 import type { MutationRecorder } from "./mutation/recorder";
 import type { MutationJournal } from "./mutation/store";
 import type { MutationEvent } from "./mutation/types";
+import { isReportedMutation, type MutationVerdict, type ReportedMutation } from "@mineral/sync-core/sync-change";
 import { createGatewayPublisher, type GatewayRpcBinding } from "./sync-publisher/gateway-rpc";
 import { drainSyncOutbox } from "./sync-publisher/publisher";
 import { drainDueIndex } from "./index/scheduler";
@@ -63,6 +64,36 @@ export default class VaultEntrypoint extends WorkerEntrypoint<VaultWorkerEnv> {
 
   private journal(): MutationJournal {
     return this.env.VAULT_INDEX.get(this.env.VAULT_INDEX.idFromName("vault")) as unknown as MutationJournal;
+  }
+
+  /**
+   * Records a mutation a **client** reported, verifying it against R2 first.
+   *
+   * This is the server-to-server form of `POST /internal/mutations`: the Sync Gateway is the only
+   * client-facing control plane, and it relays reports here over a service binding. The Vault still
+   * owns the two things that must not move — verification against the authoritative object, and the
+   * journal — and the verdict travels back so the client can tell "retry" from "give up".
+   *
+   * A refused report is a verdict, not an exception: the caller needs the distinction, and a thrown
+   * error would flatten "the revision is wrong" into "the RPC failed".
+   */
+  async recordReportedMutation(input: ReportedMutation): Promise<MutationVerdict> {
+    if (!isReportedMutation(input)) return { verdict: "refused", reason: "invalid" };
+    const event: MutationEvent = input.op === "put"
+      ? { id: input.id, source: "obsidian", op: "put", path: input.path, etag: input.etag, size: input.size, committedAt: Math.floor(input.committedAt) }
+      : { id: input.id, source: "obsidian", op: "delete", path: input.path, committedAt: Math.floor(input.committedAt), ...(input.etag ? { etag: input.etag } : {}) };
+    const journal = this.journal();
+    const service = this.service();
+    const ingress = createMutationIngress(this.env, journal, service.mutations);
+    try {
+      const result = await ingress.record(event);
+      this.ctx.waitUntil(this.drainConsumers(event.id));
+      return { verdict: result.status, seq: result.seq };
+    } catch (error) {
+      if (error instanceof MutationIngressError) return { verdict: "refused", reason: "state-mismatch" };
+      console.error(`mutation report failed id=${event.id} error=${error instanceof Error ? error.message.slice(0, 200) : "unknown"}`);
+      return { verdict: "refused", reason: "unavailable" };
+    }
   }
 
   async getDocument(key: string): Promise<VaultRpcDocument | null> {

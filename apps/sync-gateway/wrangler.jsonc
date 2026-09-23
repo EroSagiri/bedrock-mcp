@@ -11,5 +11,10 @@
   "exports": {
     "RemoteChangeHub": { "type": "durable-object", "storage": "sqlite" },
     "SyncGatewayEntrypoint": { "type": "worker" }
-  }
+  },
+  "services": [
+    // The Gateway is the only client-facing control plane, so a reported mutation arrives here and is
+    // relayed to its owner. The Vault keeps the R2 verification and the journal; this is a relay.
+    { "binding": "VAULT", "service": "mineral-vault" }
+  ]
 }

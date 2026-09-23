@@ -41,6 +41,14 @@ check(gatewayBinding?.entrypoint === "SyncGatewayEntrypoint", "vault: SYNC_GATEW
 check(exportedAs(gateway, "SyncGatewayEntrypoint") === "worker", "gateway: SyncGatewayEntrypoint must be exported as a worker entrypoint");
 check(typeof gateway.main === "string", "gateway: must declare main");
 
+// The Gateway is the only client-facing control plane, so a reported mutation arrives there and is
+// relayed to its owner. The Vault keeps the R2 verification and the journal.
+const relayBinding = (gateway.services ?? []).find(service => service.binding === "VAULT");
+check(relayBinding?.service === "mineral-vault", "gateway: VAULT must target mineral-vault");
+check(relayBinding?.entrypoint === undefined, "gateway: VAULT must bind the Vault's default entrypoint (where recordReportedMutation lives)");
+// The Gateway holds no R2 credential: it must not gain one just to be a relay.
+check((gateway.r2_buckets ?? []).length === 0, "gateway: must not hold an R2 binding (the Vault is the only thing that verifies a report)");
+
 // MCP reaches the Vault over RPC, and the Vault's RPC surface is its default export.
 const vaultBinding = (mcp.services ?? []).find(service => service.binding === "VAULT");
 check(vaultBinding?.service === "mineral-vault", "mcp: VAULT must target mineral-vault");

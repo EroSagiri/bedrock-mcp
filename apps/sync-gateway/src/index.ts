@@ -3,25 +3,39 @@ import type { MarkRemoteDirtyRequest, MarkRemoteDirtyResult } from "@mineral/syn
 import { createGatewayWebSocketTicket, isRemoteChangeChannel } from "@mineral/sync-core/gateway-protocol";
 import { isAuthorized, isSubscribeAuthorized } from "./auth";
 import { RemoteChangeHub } from "./remote-change-hub";
+import { handleMutationReport, type VaultMutationBinding } from "./mutations";
 import { parseDirtyRequest, validRpcRequest } from "./validation";
 
 export { RemoteChangeHub } from "./remote-change-hub";
+export { handleMutationReport, verdictStatus, type VaultMutationBinding } from "./mutations";
 
 export type GatewayEnv = {
   REMOTE_CHANGE_HUB: DurableObjectNamespace<RemoteChangeHub>;
   SYNC_GATEWAY_TOKEN: string;
+  /**
+   * The Vault, for the one thing a client cannot be trusted to do itself: reporting a mutation that
+   * must be verified against R2. The Gateway relays the report and returns the Vault's verdict; it
+   * holds no R2 credential and reads no object.
+   */
+  VAULT?: VaultMutationBinding;
 };
 
 /** Long enough to open a socket, short enough that a leaked ticket is worthless. */
 const WEBSOCKET_TICKET_TTL_MS = 60_000;
 
+type GatewayAction = "read" | "dirty" | "subscribe" | "ticket" | "mutations";
+
 const noStore = { "Cache-Control": "no-store", "Content-Type": "application/json" };
 const error = (status: number, code: string) => Response.json({ error: code }, { status, headers: noStore });
 
-function route(pathname: string): { channel: string; action: "read" | "dirty" | "subscribe" | "ticket" } | null {
-  const match = /^\/v1\/channels\/([^/]+)(?:\/(dirty|subscribe|ticket))?$/.exec(pathname);
+function route(pathname: string): { channel: string; action: GatewayAction } | null {
+  const match = /^\/v1\/channels\/([^/]+)(?:\/(dirty|subscribe|ticket|mutations))?$/.exec(pathname);
   if (!match || !isRemoteChangeChannel(match[1])) return null;
-  const action = match[2] === "dirty" ? "dirty" : match[2] === "subscribe" ? "subscribe" : match[2] === "ticket" ? "ticket" : "read";
+  const action: GatewayAction = match[2] === "dirty" ? "dirty"
+    : match[2] === "subscribe" ? "subscribe"
+      : match[2] === "ticket" ? "ticket"
+        : match[2] === "mutations" ? "mutations"
+          : "read";
   return { channel: match[1], action };
 }
 
@@ -45,6 +59,7 @@ export default class SyncGateway extends WorkerEntrypoint<GatewayEnv> {
     if (parsed.action === "read" && request.method !== "GET") return error(405, "method_not_allowed");
     if (parsed.action === "ticket" && request.method !== "POST") return error(405, "method_not_allowed");
     if (parsed.action === "dirty" && request.method !== "POST") return error(405, "method_not_allowed");
+    if (parsed.action === "mutations" && request.method !== "POST") return error(405, "method_not_allowed");
     // Every route authenticates here, before any Durable Object is addressed. A WebSocket route may
     // use either the bearer credential or a short-lived ticket; nothing else is accepted.
     const authorized = parsed.action === "subscribe"
@@ -65,6 +80,8 @@ export default class SyncGateway extends WorkerEntrypoint<GatewayEnv> {
       return this.env.REMOTE_CHANGE_HUB.getByName(parsed.channel).fetch(new Request("https://hub.internal/subscribe", { headers: { Upgrade: "websocket" } }));
     }
     if (parsed.action === "read") return Response.json(await this.env.REMOTE_CHANGE_HUB.getByName(parsed.channel).getGeneration(), { headers: noStore });
+    // A reported mutation is relayed to its owner for verification, and the verdict comes back out.
+    if (parsed.action === "mutations") return handleMutationReport(request, parsed.channel, this.env.VAULT);
     try {
       const input = await parseDirtyRequest(request, parsed.channel);
       if (!input) return error(request.headers.get("Content-Length") && Number(request.headers.get("Content-Length")) > 8192 ? 413 : 400, "invalid_request");

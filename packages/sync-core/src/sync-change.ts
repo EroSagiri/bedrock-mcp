@@ -34,6 +34,56 @@ export type MarkRemoteDirtyRequest = RemoteChangeHint & {
 export type MarkRemoteDirtyResult = { generation: RemoteGeneration };
 
 /**
+ * A mutation as a **client** reports it.
+ *
+ * A client writes R2 itself and then tells the control plane what it did. The shape is deliberately
+ * identical to the Vault's `MutationEvent` minus `source` (the control plane knows which writer
+ * category a client is) and minus `committedAt`, which the reporter stamps from its own clock.
+ */
+export type ReportedMutation =
+  | { id: string; op: "put"; path: string; etag: string; size: number; committedAt: number }
+  | { id: string; op: "delete"; path: string; etag?: string; committedAt: number };
+
+/**
+ * What the authority decided about a report.
+ *
+ * This is the whole reason reports travel through the control plane instead of being fire-and-forget:
+ * the verdict comes back to the client, which needs it to decide whether retrying is worth anything.
+ */
+export type MutationVerdict =
+  | { verdict: "accepted"; seq: number }
+  | { verdict: "duplicate"; seq: number }
+  /** `revoked` means a newer writer removed the stored secret for this client. */
+  | { verdict: "refused"; reason: "state-mismatch" | "invalid" | "unknown-channel" | "unavailable" | "revoked" };
+
+/** Bounded in the same places the authority bounds it, so garbage cannot reach a journal. */
+export function isReportedMutation(value: unknown): value is ReportedMutation {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const mutation = value as Record<string, unknown>;
+  if (typeof mutation.id !== "string" || mutation.id.length === 0 || mutation.id.length > 128) return false;
+  if (typeof mutation.committedAt !== "number" || !Number.isFinite(mutation.committedAt) || mutation.committedAt < 0) return false;
+  const path = mutation.path;
+  if (typeof path !== "string" || path.length === 0 || path.length > 4096 || path.startsWith("/") || path.includes("\0")) return false;
+  if (mutation.op === "put") {
+    return typeof mutation.etag === "string" && mutation.etag.length > 0 && mutation.etag.length <= 256
+      && typeof mutation.size === "number" && Number.isFinite(mutation.size) && mutation.size >= 0;
+  }
+  if (mutation.op === "delete") {
+    return mutation.etag === undefined || typeof mutation.etag === "string" && mutation.etag.length > 0 && mutation.etag.length <= 256;
+  }
+  return false;
+}
+
+export function isMutationVerdict(value: unknown): value is MutationVerdict {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const verdict = (value as { verdict?: unknown }).verdict;
+  if (verdict === "accepted" || verdict === "duplicate") return typeof (value as { seq?: unknown }).seq === "number";
+  if (verdict !== "refused") return false;
+  const reason = (value as { reason?: unknown }).reason;
+  return reason === "state-mismatch" || reason === "invalid" || reason === "unknown-channel" || reason === "unavailable" || reason === "revoked";
+}
+
+/**
  * Generations are opaque, monotonically non-decreasing decimal integers. They are deliberately
  * **not** comparable to the plugin's local `syncDirtyVersion`: the two number spaces describe
  * different things (remote wake-up level vs. local single-flight coalescing) and must never be

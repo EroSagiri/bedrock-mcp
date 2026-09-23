@@ -1,8 +1,9 @@
-import { WorkerEntrypoint } from "cloudflare:workers";
+import { WorkerEntrypoint, exports } from "cloudflare:workers";
 import VaultEntrypoint from "../../apps/vault/src/entrypoint";
 import SyncGateway from "../../apps/sync-gateway/src/index";
 import type { VaultWorkerEnv } from "../../apps/vault/src/entrypoint";
 import type { GatewayEnv } from "../../apps/sync-gateway/src/index";
+import type { VaultMutationBinding } from "../../apps/sync-gateway/src/mutations";
 
 /**
  * The integration test worker.
@@ -19,10 +20,28 @@ export { default as VaultEntrypoint } from "../../apps/vault/src/entrypoint";
 
 type TestEnv = VaultWorkerEnv & GatewayEnv;
 
+/**
+ * The Gateway's client-facing routes relay a reported mutation to a Vault. In production that is a
+ * service binding; here the Vault is this same test worker's own entrypoint, reached through the
+ * runtime's RPC stub exactly as a binding would reach it.
+ *
+ * The class is deliberately not instantiated here: a WorkerEntrypoint may only be constructed by the
+ * runtime, so the stub is the only thing that behaves like the deployed binding.
+ */
+function bindings(env: TestEnv): TestEnv {
+  return new Proxy(env, {
+    get(target, property, receiver) {
+      if (property === "VAULT") return (exports as unknown as { VaultEntrypoint: VaultMutationBinding }).VaultEntrypoint;
+      return Reflect.get(target, property, receiver) as unknown;
+    },
+  });
+}
+
 export default class TestWorker extends WorkerEntrypoint<TestEnv> {
   async fetch(request: Request): Promise<Response> {
+    const env = bindings(this.env);
     return new URL(request.url).pathname.startsWith("/v1/")
-      ? new SyncGateway(this.ctx, this.env).fetch(request)
-      : new VaultEntrypoint(this.ctx, this.env).fetch(request);
+      ? new SyncGateway(this.ctx, env).fetch(request)
+      : new VaultEntrypoint(this.ctx, env).fetch(request);
   }
 }
