@@ -387,6 +387,14 @@ op=rename → 按 put 处理（rename 在入口已经被分解，第一版不拓
 * **generation ownership 不动**：journal 的 `seq` 与 Gateway 的 `generation` 是两个独立数字空间。
   Gateway 自己维护 `mutation_id → generation`，再次收到同一 `mutationId` 时返回原 generation，
   不再次广播、不 `generation++`。
+* **一次写入只有一个 announcer**：插件配置了 Mutation Ingress 后，**不再**自发 `/dirty`；该次写入的
+  generation 只由 Vault 的 publisher 产生（模式级互斥，不是 fallback——报告可能已成功只是响应丢失，
+  再发 `/dirty` 会 bump 第二个 generation）。未配置 Ingress 时行为与之前完全一致。
+* **channel 必须真的相等**：publisher 由 `MINERAL_R2_ENDPOINT` / `MINERAL_BUCKET` /
+  `MINERAL_REMOTE_PREFIX` 派生 channel。channel 是摘要，命名空间错了不会报错，只会发布到一个没人订阅
+  的 channel，所以 `wrangler.jsonc` 的占位 endpoint 被视为"未配置"（记录
+  `mutation broadcast channel unconfigured` 并停用 publisher），而不是算出一个错误的 channel。
+  endpoint 必须是带协议的完整 URL（两侧都走 `canonicalEndpoint()` 重新解析 URL）。
 
 Gateway 侧实现（`RemoteChangeHub`）：
 
