@@ -9,7 +9,7 @@ import type {
   VaultRpcDocumentMetadata,
 } from "@mineral/core/vault-rpc";
 import { createVaultService, type VaultDocumentMetadata, type VaultService, type VaultWriteResult } from "./service";import type { VaultIndex } from "./durable/vault-index";
-import { createMutationIngress, handleMutationIngressRequest } from "./mutation/http";
+import { createMutationIngress, handleJournalStateRequest, handleMutationIngressRequest } from "./mutation/http";
 import { parseCommittedMutation, recordCommittedMutationUntilRecorded, REPAIR_ATTEMPTS, type CommittedMutationInput } from "./mutation/committed";
 import { mutationLog } from "./mutation/ids";
 import type { MutationRecorder } from "./mutation/recorder";
@@ -234,6 +234,13 @@ export default class VaultEntrypoint extends WorkerEntrypoint<VaultWorkerEnv> {
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname === "/internal/journal" && request.method === "GET") {
+      const namespace = this.env.VAULT_INDEX;
+      return handleJournalStateRequest(request, this.env, async () => {
+        const stub = namespace.get(namespace.idFromName("vault")) as unknown as VaultIndex;
+        return stub.journalState();
+      });
+    }
     if (url.pathname !== "/internal/mutations" || request.method !== "POST") return new Response("Not found", { status: 404 });
     const ingress = createMutationIngress(this.env, this.journal(), this.service().mutations);
     const outcome = await handleMutationIngressRequest(request, this.env, ingress);

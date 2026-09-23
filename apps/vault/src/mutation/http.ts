@@ -109,3 +109,21 @@ export async function handleMutationIngressRequest(
     return { response: json(503, { error: "journal_unavailable", mutationId: event.id }), recorded: false };
   }
 }
+
+/**
+ * `GET /internal/journal` — aggregate journal state, for an operator.
+ *
+ * Read-only, token-gated, and deliberately aggregate: it answers "did the facts arrive, and did they
+ * leave?" without exposing a single path. The mutation route is the write surface; this one only
+ * counts, so it can be called while diagnosing without touching the vault's contents.
+ */
+export async function handleJournalStateRequest(
+  request: Request,
+  env: MutationIngressEnv,
+  state: () => Promise<Record<string, unknown>>,
+): Promise<Response> {
+  const headers = { "Cache-Control": "no-store", "Content-Type": "application/json" };
+  if (!env.MUTATION_INGRESS_TOKEN) return Response.json({ error: "ingress_disabled" }, { status: 503, headers });
+  if (request.headers.get("Authorization") !== `Bearer ${env.MUTATION_INGRESS_TOKEN}`) return Response.json({ error: "unauthorized" }, { status: 401, headers });
+  return Response.json(await state(), { headers });
+}

@@ -25,10 +25,13 @@ const rows = (result: Iterable<Row>) => [...result];
  */
 export class VaultIndex extends DurableObject<Env> {
   private readonly mutations: SqlMutationStore;
+  /** The SQLite handle, so read-only diagnostics can query the journal directly. */
+  private readonly db: SqlDatabase;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    this.mutations = new SqlMutationStore(this.ctx.storage.sql as unknown as SqlDatabase);
+    this.db = this.ctx.storage.sql as unknown as SqlDatabase;
+    this.mutations = new SqlMutationStore(this.db);
     ctx.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS index_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS documents (generation INTEGER NOT NULL, key TEXT NOT NULL, etag TEXT NOT NULL, modified TEXT NOT NULL, size INTEGER NOT NULL, content_type TEXT, PRIMARY KEY (generation, key));
@@ -103,6 +106,44 @@ export class VaultIndex extends DurableObject<Env> {
 
   async markBroadcast(input: { mutationId: string; state: "published" | "pending"; generation?: string; error?: string }): Promise<void> {
     this.mutations.markBroadcast(input);
+  }
+
+  /**
+   * Aggregate journal state, for an operator asking "did the facts arrive, and did they leave?".
+   *
+   * Counts and the newest id only: the journal's paths are a knowledge base, and an endpoint that
+   * lists them would be a way to read the vault without R2 credentials.
+   */
+  async journalState(): Promise<{
+    total: number;
+    pending: number;
+    published: number;
+    sources: Record<string, number>;
+    lastSeq: number | null;
+    lastMutationId: string | null;
+  }> {
+    const summary = rows(this.db.exec(
+      `SELECT COUNT(*) total,
+              SUM(CASE WHEN broadcast_state = 'pending' THEN 1 ELSE 0 END) pending,
+              SUM(CASE WHEN broadcast_state = 'published' THEN 1 ELSE 0 END) published,
+              MAX(seq) last_seq
+       FROM mutation_journal`,
+    ))[0] as { total: number; pending: number; published: number; last_seq: number | null } | undefined;
+    const sources: Record<string, number> = {};
+    for (const row of this.db.exec<{ source: string; count: number }>("SELECT source, COUNT(*) count FROM mutation_journal GROUP BY source")) {
+      sources[row.source] = Number(row.count);
+    }
+    const last = summary?.last_seq
+      ? rows(this.db.exec("SELECT mutation_id FROM mutation_journal WHERE seq = ?", summary.last_seq))[0] as { mutation_id: string } | undefined
+      : undefined;
+    return {
+      total: Number(summary?.total ?? 0),
+      pending: Number(summary?.pending ?? 0),
+      published: Number(summary?.published ?? 0),
+      sources,
+      lastSeq: summary?.last_seq ?? null,
+      lastMutationId: last?.mutation_id ?? null,
+    };
   }
 
   // ---------------------------------------------------------------------------------------------
