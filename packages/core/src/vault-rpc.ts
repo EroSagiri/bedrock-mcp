@@ -117,6 +117,16 @@ export type VaultRpc = {
    */
   probeEmbeddingModel?(model?: string): Promise<Record<string, unknown>>;
   /**
+   * Semantic search, deliberately separate from the full-text `search` kind.
+   *
+   * The two answer different questions and have different failure modes: full text can only miss, a
+   * vector search can also return a passage that no longer describes the note. Merging them would hide
+   * that difference behind one ranking, so they stay separate until the vector half has proven itself.
+   */
+  searchSemantic?(input: { query: string; limit?: number; prefix?: string }): Promise<Record<string, unknown>>;
+  /** Counts and the frozen schema. No paths: the vector index is still the vault. */
+  vectorHealth?(): Promise<Record<string, unknown>>;
+  /**
    * Optional because it is only meaningful to a caller that saw `mutationPending: true`; a Vault that
    * predates the mutation journal simply does not implement it.
    */

@@ -1,21 +1,43 @@
-import { isTextDocumentKey } from "@mineral/core/keys";
 import { DurableObject } from "cloudflare:workers";
 import { SqlMutationStore, type SqlDatabase } from "../index/journal-store";
 import { CURRENT_INDEX_VERSION, INDEX_SCHEMA_VERSION, LIVE_INDEX_SCHEMA, freshnessStatus, type FreshnessRow, type IndexedDocument } from "../index/live-store";
+import { isIndexable } from "../index/indexable";
 import { parseDocument } from "../index/parse";
 import type { IndexAction, IndexIntentSpec } from "../index/intents";
 import { AUDIT_SCHEMA, type IndexAudit } from "../index/audit";
+import { SqlVectorStore, type DueVectorIntent, type VectorClaim, type VectorHealth, type VectorQueueSummary } from "../vector/store";
+import { collectVectorGarbage, applyVectorIntent as applyVectorIntentWith, type VectorApplyResult } from "../vector/publish";
+import { embedTexts, type EmbeddingBinding } from "../vector/embedding";
+import { VECTOR_SCHEMA, vectorIndexSchema } from "../vector/schema";
+import { mutationLog } from "../mutation/ids";
 import type { DueIndexIntent, IndexClaim, PendingIndexSummary, RecordMutationResult } from "../mutation/store";
 import type { JournalEntry, MutationEvent } from "../mutation/types";
 
-type Env = { MINERAL: R2Bucket };
+/**
+ * The Vectorize binding, described structurally.
+ *
+ * Only the three operations this layer needs are named, and none of them carries a path: a metadata
+ * field is readable by anyone who can read the index, and the Vault already refuses to put vault paths
+ * anywhere but in its own storage.
+ */
+export type VectorizeBinding = {
+  upsert(vectors: Array<{ id: string; values: number[]; metadata?: Record<string, unknown> }>): Promise<unknown>;
+  deleteByIds(ids: string[]): Promise<unknown>;
+  query(vector: number[], options?: { topK?: number; returnMetadata?: "none" | "indexed" | "all" }): Promise<{ matches?: Array<{ id: string; score: number }> }>;
+};
+
+type Env = { MINERAL: R2Bucket; AI?: EmbeddingBinding; VECTORIZE?: VectorizeBinding };
 type Row = Record<string, unknown>;
-const SYSTEM = [".history/", ".trash/", ".system/"];
-const isIndexable = (key: string) => isTextDocumentKey(key) && !SYSTEM.some(prefix => key.startsWith(prefix));
 const rows = (result: Iterable<Row>) => [...result];
 
 /** How many R2 objects one audit page lists. Small enough that a page never approaches CPU limits. */
 const AUDIT_PAGE_SIZE = 200;
+
+/** Where the physical identity of the Vectorize index is recorded, once. */
+const VECTOR_INDEX_SCHEMA_META = "vector_index_schema";
+
+/** How much of a matched chunk a semantic result carries. The whole chunk is in the ledger if it is needed. */
+const SEMANTIC_SNIPPET_CHARS = 700;
 
 /**
  * The single, named instance holds two different things that must not be conflated:
@@ -30,6 +52,7 @@ const AUDIT_PAGE_SIZE = 200;
  */
 export class VaultIndex extends DurableObject<Env> {
   private readonly mutations: SqlMutationStore;
+  private readonly vectors: SqlVectorStore;
   /** The SQLite handle, so read-only diagnostics can query the journal directly. */
   private readonly db: SqlDatabase;
 
@@ -37,6 +60,7 @@ export class VaultIndex extends DurableObject<Env> {
     super(ctx, env);
     this.db = this.ctx.storage.sql as unknown as SqlDatabase;
     this.mutations = new SqlMutationStore(this.db);
+    this.vectors = new SqlVectorStore(this.db);
     // Only `index_meta` is created eagerly: it holds the migration marker, and it is the one table the
     // live schema never redefines. The generation-era tables are deliberately *not* created here — an
     // install that predates the live index still has them, and `migrateToLiveIndex` drops them before
@@ -61,6 +85,7 @@ export class VaultIndex extends DurableObject<Env> {
     this.db.exec("DELETE FROM mutation_journal; DELETE FROM pending_index;");
     this.db.exec("DELETE FROM documents_fts; DELETE FROM documents; DELETE FROM document_headings; DELETE FROM frontmatter_values; DELETE FROM document_tags; DELETE FROM links;");
     this.db.exec("DELETE FROM index_audit; DELETE FROM index_audit_seen;");
+    this.vectors.clear();
   }
 
   /**
@@ -285,7 +310,13 @@ export class VaultIndex extends DurableObject<Env> {
     return { audit: completed, enqueued, removed, done: true };
   }
 
-  /** Writes one dirty-set entry, coalescing with whatever is already owed for that path. */
+  /**
+   * Writes one dirty-set entry, coalescing with whatever is already owed for that path.
+   *
+   * Both consumers are enqueued together. An audit that found the note index behind on a path has found
+   * the vector layer behind on it too, for the same reason and at the same moment; enqueuing only the
+   * note index would leave the vectors owed until the next nightly walk.
+   */
   private enqueueIntent(path: string, action: IndexAction, targetEtag: string | null, notBefore: number): void {
     const now = Date.now();
     this.db.exec(
@@ -301,6 +332,10 @@ export class VaultIndex extends DurableObject<Env> {
          last_claim_at = NULL,
          last_error = NULL`,
       path, action, action === "remove" ? null : targetEtag, Math.max(notBefore, 0), now, now,
+    );
+    this.vectors.enqueueWithinTransaction(
+      { path, action, targetEtag, notBefore: Math.max(notBefore, 0) },
+      "system",
     );
   }
 
@@ -351,11 +386,21 @@ export class VaultIndex extends DurableObject<Env> {
    * `recordMutation()`'s durable half.
    *
    * The caller has already computed the index intents (`indexIntentsFor`); this method owns only the
-   * atomicity: the fact and its intents commit in one transaction, so a crash between them is
-   * impossible and a caller that sees a failure knows the whole write was abandoned.
+   * atomicity: the fact, its note-index intents and its vector intents commit in one transaction, so a
+   * crash between them is impossible and a caller that sees a failure knows the whole write was
+   * abandoned.
+   *
+   * The vector dirty set is written here rather than derived later because a committed write that forgot
+   * its vector debt is invisible until the nightly audit — up to twenty-four hours of a note that is
+   * indexed but not searchable by meaning. Only a *newly inserted* fact enqueues: a duplicate report must
+   * not reset a backoff that a failing path has earned.
    */
   async recordMutation(input: { event: MutationEvent; intents: IndexIntentSpec[] }): Promise<RecordMutationResult> {
-    return this.ctx.storage.transactionSync(() => this.mutations.recordWithinTransaction(input.event, input.intents));
+    return this.ctx.storage.transactionSync(() => {
+      const result = this.mutations.recordWithinTransaction(input.event, input.intents);
+      if (result.inserted) for (const spec of input.intents) this.vectors.enqueueWithinTransaction(spec, input.event.source);
+      return result;
+    });
   }
 
   async findMutation(mutationId: string): Promise<JournalEntry | null> {
@@ -495,6 +540,209 @@ export class VaultIndex extends DurableObject<Env> {
     } catch (error) {
       return { applied: false, error: error instanceof Error ? error.message.slice(0, 200) : "index apply failed" };
     }
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // The vector layer: the same shape as the note index, with Vectorize on the far side.
+  // ---------------------------------------------------------------------------------------------
+
+  /**
+   * Refuses to publish into an index built for a different embedding function.
+   *
+   * Width and metric are fixed when a Vectorize index is created, and two models do not share a vector
+   * space even at the same width. If the compiled-in schema disagrees with what this Vault recorded on
+   * its first publish, the deployment has been pointed at another index: publishing would mix
+   * incomparable vectors, which no reader could detect and no repair could undo. The drain stops and
+   * says so, and the migration — a new index and a backfill — is a human decision.
+   */
+  private vectorSchemaMismatch(): string | null {
+    const recorded = this.getMeta(VECTOR_INDEX_SCHEMA_META);
+    if (recorded === null) return null;
+    return recorded === JSON.stringify(vectorIndexSchema()) ? null : "vector index schema changed: this deployment needs a new index and a backfill";
+  }
+
+  /**
+   * The two platform bindings the vector layer talks to, as overridable seams.
+   *
+   * They are the only thing standing between the state machine and a hermetic test: Miniflare simulates
+   * neither Workers AI nor Vectorize locally — both are remote-only — so a test that wants to exercise
+   * the real SQLite has to supply its own. Everything else in this class is the code under test.
+   */
+  protected embeddings(): EmbeddingBinding | undefined {
+    return this.env.AI;
+  }
+
+  protected vectorIndexBinding(): VectorizeBinding | undefined {
+    return this.env.VECTORIZE;
+  }
+
+  /** The Vectorize binding, or a failure that names what is missing. */
+  private vectorize(): VectorizeBinding {
+    const binding = this.vectorIndexBinding();
+    if (!binding) throw new Error("vectorize binding missing");
+    return binding;
+  }
+
+  private vectorDeps() {
+    return {
+      state: this.vectors,
+      readObject: async (path: string) => {
+        const object = await this.env.MINERAL.get(path);
+        return object ? { text: await object.text(), etag: object.etag } : null;
+      },
+      observeEtag: async (path: string) => (await this.env.MINERAL.head(path))?.etag ?? null,
+      lookupDocument: (key: string) => this.lookupDocument(key),
+      digest: sha256Hex,
+      embed: (texts: string[]) => embedTexts(this.embeddings(), texts),
+      upsert: (records: Parameters<VectorizeBinding["upsert"]>[0]) => this.vectorize().upsert(records),
+      deleteVectors: (ids: string[]) => this.vectorize().deleteByIds(ids),
+      // The publish point and both cleanup steps are transactions: the ledger and the state that
+      // interprets it must never be readable half-written.
+      publish: (state: SqlVectorStore, documentId: number, key: string, revision: Parameters<SqlVectorStore["publishRevision"]>[2], chunks: Parameters<SqlVectorStore["publishRevision"]>[3], now: number) =>
+        this.ctx.storage.transactionSync(() => state.publishRevision(documentId, key, revision, chunks, now)),
+      forget: (state: SqlVectorStore, documentId: number) => this.ctx.storage.transactionSync(() => state.forgetDocument(documentId)),
+      forgetChunks: (state: SqlVectorStore, chunkIds: string[]) => this.ctx.storage.transactionSync(() => state.forgetChunks(chunkIds)),
+      now: Date.now,
+    };
+  }
+
+  /**
+   * Brings one document's vectors in line with R2. The single write path for the vector index.
+   *
+   * Like the note indexer, it re-observes R2 rather than trusting the intent: an intent to remove is
+   * verified the same way, because an audit's delete candidate is a hint and this method is not.
+   */
+  async applyVectorIntent(input: { path: string; action: "upsert" | "remove" }): Promise<VectorApplyResult> {
+    const mismatch = this.vectorSchemaMismatch();
+    if (mismatch) return { applied: false, error: mismatch };
+    try {
+      const result = await applyVectorIntentWith(this.vectorDeps(), input);
+      if (result.applied && result.status === "published") this.setMeta(VECTOR_INDEX_SCHEMA_META, JSON.stringify(vectorIndexSchema()));
+      return result;
+    } catch (error) {
+      const message = error instanceof Error ? error.message.slice(0, 200) : "vector apply failed";
+      // Recorded on the state row so the health endpoint can say *why* a document is behind.
+      const document = this.lookupDocument(input.path);
+      if (document) this.vectors.recordFailure(document.id, input.path, message, Date.now());
+      return { applied: false, error: message };
+    }
+  }
+
+  async collectVectorGarbage(limit: number): Promise<number> {
+    try {
+      return await collectVectorGarbage(this.vectorDeps(), limit);
+    } catch (error) {
+      mutationLog("vector garbage collection failed", { error: error instanceof Error ? error.message.slice(0, 200) : "unknown" });
+      return 0;
+    }
+  }
+
+  async pendingVectorSummary(now: number): Promise<VectorQueueSummary> {
+    return this.vectors.pendingSummary(now);
+  }
+
+  async listDueVectorPaths(now: number, limit: number): Promise<DueVectorIntent[]> {
+    return this.vectors.listDuePaths(now, limit);
+  }
+
+  async claimPendingVector(input: { path: string; etag: string | null; action: "upsert" | "remove"; now: number }): Promise<VectorClaim> {
+    return this.vectors.claim(input);
+  }
+
+  async completeVector(input: { path: string; etag: string | null; action: "upsert" | "remove" }): Promise<boolean> {
+    return this.vectors.complete(input);
+  }
+
+  async failVector(input: { path: string; etag: string | null; action: "upsert" | "remove"; error: string; notBefore: number }): Promise<void> {
+    this.vectors.fail(input);
+  }
+
+  /**
+   * The correction path for a vector index that is behind without R2 having moved.
+   *
+   * A bumped chunker or a re-embedded model leaves every document stale while the note index is
+   * perfectly current, so nothing in the audit's R2 walk can notice. This asks the vector state itself,
+   * and the nightly audit runs it once the walk is done.
+   */
+  async enqueueStaleVectors(now: number): Promise<number> {
+    return this.vectors.enqueueStale(now, {
+      chunkerVersion: VECTOR_SCHEMA.chunkerVersion,
+      embeddingModel: VECTOR_SCHEMA.model,
+      vectorVersion: VECTOR_SCHEMA.version,
+    });
+  }
+
+  /**
+   * The health of the vector index, and of the thing that can silently ruin it.
+   *
+   * `filteredAll` counts searches whose candidates were *all* refused by the acceptance rule. One is a
+   * race; a growing number means the vectors and the notes have stopped agreeing, which is exactly the
+   * failure a semantic search would otherwise hide by returning nothing.
+   */
+  async vectorHealth(): Promise<Row> {
+    const health: VectorHealth = this.vectors.health({
+      chunkerVersion: VECTOR_SCHEMA.chunkerVersion,
+      embeddingModel: VECTOR_SCHEMA.model,
+      vectorVersion: VECTOR_SCHEMA.version,
+    });
+    const queue = this.vectors.pendingSummary(Date.now());
+    return {
+      ...health,
+      owed: queue.upserts,
+      removalOwed: queue.removes,
+      filteredAllSearches: Number(this.getMeta("vector_filtered_all") ?? "0"),
+      schemaMismatch: this.vectorSchemaMismatch(),
+      schema: vectorIndexSchema(),
+      bindings: { ai: Boolean(this.embeddings()), vectorize: Boolean(this.vectorIndexBinding()) },
+    };
+  }
+
+  /**
+   * The retrieval half of a semantic search.
+   *
+   * The query vector arrives already embedded, because embedding needs the AI binding and belongs to the
+   * caller; everything after it must be inside the Durable Object, because the acceptance rule reads the
+   * ledger. Vectorize is asked for more candidates than the caller wants: the rule can refuse a
+   * candidate, and a refusal that was never retrieved cannot be replaced.
+   */
+  async searchSemantic(input: { vector: number[]; limit: number; prefix: string }): Promise<Row> {
+    const revision = { chunkerVersion: VECTOR_SCHEMA.chunkerVersion, embeddingModel: VECTOR_SCHEMA.model, vectorVersion: VECTOR_SCHEMA.version };
+    const requested = Math.min(Math.max(input.limit, 1), 50);
+    const binding = this.vectorIndexBinding();
+    if (!binding) return { ...this.freshness(), ...(await this.vectorHealth()), source: "vector", results: [], partial: true, error: "vectorize_binding_missing" };
+    const response = await binding.query(input.vector, { topK: Math.min(requested * 4, 60), returnMetadata: "none" });
+    const matches = response.matches ?? [];
+    const accepted = this.vectors.acceptHits(matches.map(match => match.id), input.prefix, revision);
+    const order = new Map(matches.map((match, index) => [match.id, { index, score: match.score }]));
+    const results = accepted
+      .sort((left, right) => (order.get(left.chunkId)?.index ?? 0) - (order.get(right.chunkId)?.index ?? 0))
+      .slice(0, requested)
+      .map(hit => ({
+        key: hit.key,
+        title: hit.title,
+        modified: hit.modified,
+        size: hit.size,
+        heading: hit.heading,
+        ordinal: hit.ordinal,
+        score: order.get(hit.chunkId)?.score ?? null,
+        snippet: hit.text.length > SEMANTIC_SNIPPET_CHARS ? `${hit.text.slice(0, SEMANTIC_SNIPPET_CHARS)}…` : hit.text,
+      }));
+    const filtered = matches.length - accepted.length;
+    if (matches.length > 0 && accepted.length === 0) {
+      // Every candidate was refused. That is not "no results": it means the vectors on offer do not
+      // describe the revisions the vault currently holds, which is a condition worth shouting about.
+      this.setMeta("vector_filtered_all", String(Number(this.getMeta("vector_filtered_all") ?? "0") + 1));
+      mutationLog("vector search filtered every candidate", { count: matches.length, status: "filtered" });
+    }
+    return {
+      ...this.freshness(),
+      ...(await this.vectorHealth()),
+      source: "vector",
+      results,
+      candidates: matches.length,
+      filteredCandidates: filtered,
+      partial: accepted.length < requested,
+    };
   }
 
   async fetch(request: Request): Promise<Response> {

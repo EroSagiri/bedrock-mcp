@@ -19,6 +19,11 @@
     { "binding": "MINERAL", "bucket_name": "mineral" }
   ],
   "ai": { "binding": "AI" },
+  // Created at the width the deployed model was measured to produce, with `wrangler vectorize create
+  // mineral-notes --dimensions=1024 --metric=cosine`. Neither can be changed afterwards.
+  "vectorize": [
+    { "binding": "VECTORIZE", "index_name": "mineral-notes" }
+  ],
   "services": [
     {
       "binding": "SYNC_GATEWAY",

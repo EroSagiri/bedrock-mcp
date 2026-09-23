@@ -170,3 +170,36 @@ function expectedSchema() {
     chunkerVersion: VECTOR_SCHEMA.chunkerVersion,
   };
 }
+
+/**
+ * How many chunks go into one Workers AI call.
+ *
+ * The bound is request size, not context: a chunk is capped at 1500 characters, and a batch has to stay
+ * comfortably inside what the platform accepts. Most notes are one batch.
+ */
+export const EMBED_BATCH_SIZE = 8;
+
+/**
+ * Embeds chunk texts, refusing anything it cannot line up with the request.
+ *
+ * The count, width and finiteness checks are the whole value of this function. A vector has to be
+ * attached to exactly the chunk it came from, and every similarity in the index assumes all vectors are
+ * the same width and none of them is NaN — a silent mismatch would produce a search that returns
+ * plausible results for the wrong text, which is worse than an error.
+ */
+export async function embedTexts(ai: EmbeddingBinding | undefined, texts: readonly string[], model: string = VECTOR_SCHEMA.model): Promise<number[][]> {
+  if (!ai?.run) throw new Error("ai-binding-missing");
+  const vectors: number[][] = [];
+  for (let offset = 0; offset < texts.length; offset += EMBED_BATCH_SIZE) {
+    const batch = texts.slice(offset, offset + EMBED_BATCH_SIZE);
+    const { envelope, vectors: returned } = vectorsOf(await ai.run(model, { text: [...batch] }));
+    if (envelope === "unrecognised") throw new Error("embedding response contained no vector");
+    if (returned.length !== batch.length) throw new Error(`embedding count mismatch: asked for ${batch.length}, received ${returned.length}`);
+    for (const vector of returned) {
+      if (vector.length !== VECTOR_SCHEMA.dimensions) throw new Error(`embedding width ${vector.length} does not match the index width ${VECTOR_SCHEMA.dimensions}`);
+      if (!vector.every(Number.isFinite)) throw new Error("embedding contained a non-finite value");
+      vectors.push(vector);
+    }
+  }
+  return vectors;
+}

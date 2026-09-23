@@ -106,10 +106,17 @@ describe("probing the embedding model", () => {
 });
 
 describe("the probe over the RPC surface", () => {
-  it("is reachable, and reports the missing binding the test deployment actually has", async () => {
+  it("is reachable, and measures the width the Vectorize index was created at", async () => {
     // The interesting assertion is that the method survives the RPC boundary at all: a WorkerEntrypoint
     // method that is not public is invisible from here, and the production probe would silently 404.
     const result = await vaultEntrypoint().probeEmbeddingModel!();
-    expect(result).toMatchObject({ ok: false, reason: "ai-binding-missing", model: VECTOR_SCHEMA.model });
+    expect(result).toMatchObject({
+      ok: true,
+      model: VECTOR_SCHEMA.model,
+      inputShape: "text[]",
+      matchesExpectedDimensions: true,
+      observed: { envelope: "data", vectorCount: 2, dimensions: VECTOR_SCHEMA.dimensions },
+    });
+    expect(result.errors).toEqual([]);
   });
 });

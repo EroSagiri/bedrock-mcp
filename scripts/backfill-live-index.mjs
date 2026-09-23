@@ -1,73 +1,42 @@
 #!/usr/bin/env node
 /**
- * Drives the deployed revision audit to completion and reports what the live index holds.
+ * Drives the deployed revision audit to completion, and reports what both index consumers hold.
  *
- * A run is bounded: it walks at most AUDIT_PAGE_LIMIT pages and clears at most AUDIT_DRAIN_PER_PAGE of
- * the dirty set per page, so a first-time backfill needs several runs. It stops when the audit has
- * walked the whole vault and nothing is left owed.
+ * One run is bounded on purpose: it walks at most AUDIT_PAGE_LIMIT pages of R2 and clears a capped number
+ * of documents per page, for both the note index and the vector index. A first-time backfill therefore
+ * needs several runs, and this script makes them until nothing is owed — which is also the only way to
+ * know that a semantic search will answer completely.
  *
- * Usage: node scripts/backfill-live-index.mjs <mcpUrl> [maxRuns]
+ * The URL is read from `.env`; see `scripts/mcp-client.mjs` for why it is never an argument.
+ *
+ * Usage: node scripts/backfill-live-index.mjs [maxRuns]
  */
-const [mcpUrl, maxRunsArg] = process.argv.slice(2);
-if (!mcpUrl) {
-  console.error("usage: backfill-live-index.mjs <mcpUrl> [maxRuns]");
-  process.exit(2);
-}
-const maxRuns = Number(maxRunsArg) || 40;
-const target = new URL(mcpUrl);
-let session;
-let nextId = 1;
+import { connect } from "./mcp-client.mjs";
 
-async function rpcOnce(method, params) {
-  const response = await fetch(mcpUrl, {
-    method: "POST",
-    headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...(session ? { "mcp-session-id": session } : {}) },
-    body: JSON.stringify({ jsonrpc: "2.0", id: nextId++, method, params }),
-  });
-  session ??= response.headers.get("mcp-session-id") ?? undefined;
-  const text = await response.text();
-  const contentType = response.headers.get("content-type") ?? "";
-  const payload = contentType.includes("text/event-stream")
-    ? text.split(/\r?\n/).filter(line => line.startsWith("data:")).map(line => line.slice(5).trim()).join("")
-    : text;
-  if (!payload) return undefined;
-  const message = JSON.parse(payload);
-  if (message.error) throw new Error(`${method}: ${JSON.stringify(message.error)}`);
-  return message.result;
-}
+const maxRuns = Number(process.argv[2]) || 60;
+const mcp = await connect();
+console.log(`endpoint=${mcp.safeEndpoint}`);
+console.log(`initialize → ${mcp.serverInfo}`);
 
-/** This host resets new TLS handshakes intermittently, so every call retries. */
-async function rpc(method, params) {
-  let lastError;
-  for (let attempt = 1; attempt <= 5; attempt++) {
-    try {
-      return await rpcOnce(method, params);
-    } catch (error) {
-      lastError = error;
-      if (attempt < 5) await new Promise(resolve => setTimeout(resolve, 1500));
-    }
-  }
-  throw lastError;
-}
-
-async function callTool(name, args = {}) {
-  const result = await rpc("tools/call", { name, arguments: args });
-  return { isError: result?.isError ?? false, text: (result?.content ?? []).map(part => part.text ?? "").join("\n") };
-}
-
-console.log(`endpoint=${target.origin}/mcp/<redacted>`);
-await rpc("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "backfill", version: "1.0.0" } });
-
+let last = null;
 for (let run = 1; run <= maxRuns; run++) {
-  await callTool("vault_index_refresh");
-  const stats = JSON.parse((await callTool("vault_stats")).text);
-  const pending = stats.pending ?? {};
-  console.log(`run ${run}: documents=${stats.documents} stale=${stats.staleDocuments} owed=${(pending.upserts ?? 0) + (pending.removes ?? 0)}`);
-  if (stats.staleDocuments === 0 && (pending.upserts ?? 0) + (pending.removes ?? 0) === 0 && stats.documents > 0) {
-    console.log(`PASS  live index complete: ${stats.documents} documents, nothing owed`);
+  const refresh = await mcp.callTool("vault_index_refresh");
+  if (refresh.isError) {
+    console.error(`run ${run}: vault_index_refresh failed\n${refresh.text}`);
+    process.exit(1);
+  }
+  const audit = JSON.parse(refresh.text);
+  last = audit;
+  console.log(
+    `run ${run}: pages=${audit.pages} scanned=${audit.scanned} ` +
+    `notes(enqueued=${audit.enqueued} applied=${audit.applied} owed=${audit.pendingLeft}) ` +
+    `vectors(enqueued=${audit.vectorsEnqueued} applied=${audit.vectorsApplied} collected=${audit.vectorsCollected} owed=${audit.vectorsPendingLeft})`,
+  );
+  if (audit.pendingLeft === 0 && audit.vectorsPendingLeft === 0 && audit.scanned > 0) {
+    console.log(`PASS  both indexes complete: ${audit.scanned} documents scanned, nothing owed`);
     process.exit(0);
   }
 }
 
-console.log(`stopped after ${maxRuns} runs; the index is still catching up`);
+console.error(`stopped after ${maxRuns} runs; still owed: notes=${last?.pendingLeft} vectors=${last?.vectorsPendingLeft}`);
 process.exit(1);

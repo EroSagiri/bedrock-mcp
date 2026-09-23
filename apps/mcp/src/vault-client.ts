@@ -44,6 +44,9 @@ export type VaultClient = {
   };
   /** `null` when the Vault predates the embedding binding and cannot answer the probe at all. */
   probeEmbeddingModel(model?: string): Promise<Record<string, unknown> | null>;
+  /** `null` when the Vault has no vector index, which is a deployment fact rather than an error. */
+  searchSemantic(input: { query: string; limit?: number; prefix?: string }): Promise<Record<string, unknown> | null>;
+  vectorHealth(): Promise<Record<string, unknown> | null>;
   /** `null` when the Vault predates the mutation journal and cannot record a committed write. */
   recordCommittedMutation(input: CommittedMutationInput): Promise<RecordCommittedMutationResult | null>;
   /** Facts this client has not managed to get recorded yet. Diagnostics and tests only. */
@@ -178,6 +181,14 @@ export function createVaultClient(rpc: VaultRpc, dependencies: VaultClientDepend
     async probeEmbeddingModel(model) {
       if (!rpc.probeEmbeddingModel) return null;
       return rpc.probeEmbeddingModel(model);
+    },
+    async searchSemantic(input) {
+      if (!rpc.searchSemantic) return null;
+      return rpc.searchSemantic(input);
+    },
+    async vectorHealth() {
+      if (!rpc.vectorHealth) return null;
+      return rpc.vectorHealth();
     },
     /**
      * The repair half of a write.

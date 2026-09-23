@@ -79,6 +79,13 @@ for (const key of ["MINERAL_R2_ENDPOINT", "MINERAL_BUCKET", "MINERAL_REMOTE_PREF
 check(vault.ai?.binding === "AI", "vault: must declare the Workers AI binding as AI (the embedding probe and the vector index depend on it)");
 check(!(mcp.ai ?? gateway.ai), "mcp/gateway: must not hold an AI binding (only the Vault embeds)");
 
+// The Vectorize index is the physical half of the vector contract: the binding name has to be the one
+// the Durable Object reads, and the index name has to be the one that was created at the measured width.
+const vectorize = (vault.vectorize ?? [])[0];
+check(vectorize?.binding === "VECTORIZE", "vault: must declare a vectorize binding named VECTORIZE");
+check(typeof vectorize?.index_name === "string" && vectorize.index_name.length > 0, "vault: the vectorize binding must name an index (the index's width and metric are immutable, so a wrong name is a wrong vector space)");
+check((gateway.vectorize ?? []).length === 0, "gateway: must not hold a vectorize binding (the Vault owns the vector index)");
+
 if (failures.length > 0) {
   console.error("worker binding validation failed:");
   for (const failure of failures) console.error(`  - ${failure}`);

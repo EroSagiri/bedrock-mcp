@@ -220,6 +220,12 @@ const TOOL_METADATA: Record<string, {
     title: "Probe the embedding model",
     description: "Measure the deployed embedding model's real vector width, so a Vectorize index is created at the right size.",
   },
+  search_semantic: {
+    category: "search",
+    risk: "read",
+    title: "Semantic search",
+    description: "Search notes by meaning, using the vector index. Complements full-text search rather than replacing it.",
+  },
 };
 
 function annotationsFor(risk: ToolRisk, title: string): ToolAnnotations {
@@ -232,20 +238,30 @@ function annotationsFor(risk: ToolRisk, title: string): ToolAnnotations {
   };
 }
 
-function configFor<Args extends ToolShape>(
+/** A Zod schema, as opposed to a record of them. */
+function isZodSchema(value: unknown): boolean {
+  return !!value && typeof value === "object" && typeof (value as { safeParse?: unknown }).safeParse === "function";
+}
+
+/**
+ * Tells the two accepted forms of the third argument apart.
+ *
+ * A config carries an `inputSchema` that is a *shape* — a plain record of schemas — while the shorthand
+ * form is a shape itself, with no `inputSchema` key. The distinction is structural rather than inferred
+ * from sibling keys, because inferring it that way silently misfiled `{ inputSchema: { ... } }` as a
+ * shape, and the failure surfaced at registration time as "expected a Zod schema", on every call.
+ */
+function isToolConfig<Args extends ToolShape>(value: Args | ToolCompatConfig<Args>): value is ToolCompatConfig<Args> {
+  return !!value && "inputSchema" in value && !isZodSchema((value as { inputSchema: unknown }).inputSchema);
+}
+
+/** Exported for its own test: which of the two forms was passed decides how the tool is registered. */
+export function resolveToolConfig<Args extends ToolShape>(
   name: string,
   inputSchemaOrConfig: Args | ToolCompatConfig<Args>
 ): ToolCompatConfig<Args> {
-  const looksLikeConfig = "inputSchema" in inputSchemaOrConfig
-    && (
-      "title" in inputSchemaOrConfig ||
-      "description" in inputSchemaOrConfig ||
-      "annotations" in inputSchemaOrConfig ||
-      "_meta" in inputSchemaOrConfig ||
-      "outputSchema" in inputSchemaOrConfig
-    );
-  const supplied = looksLikeConfig
-    ? inputSchemaOrConfig as ToolCompatConfig<Args>
+  const supplied = isToolConfig(inputSchemaOrConfig)
+    ? inputSchemaOrConfig
     : { inputSchema: inputSchemaOrConfig as Args };
   const meta = TOOL_METADATA[name] ?? {
     category: "vault" as const,
@@ -292,7 +308,7 @@ export function registerToolCompat<Args extends ToolShape>(
   inputSchemaOrConfig: Args | ToolCompatConfig<Args>,
   cb: ToolCompatCallback<Args>
 ): RegisteredTool {
-  const config = configFor(name, inputSchemaOrConfig);
+  const config = resolveToolConfig(name, inputSchemaOrConfig);
   return server.registerTool(name, {
     ...config,
     inputSchema: z.object(config.inputSchema),

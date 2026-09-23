@@ -40,6 +40,10 @@ export type MutationLogFields = {
   gatewayGeneration?: string;
   attempts?: number;
   count?: number;
+  /** A published/removal outcome, already reduced to one word. */
+  status?: string;
+  /** How many chunks one vector publish covered. */
+  chunks?: number;
   /** A classified failure, already shortened; never a body, a token, or a raw path. */
   error?: string;
 };

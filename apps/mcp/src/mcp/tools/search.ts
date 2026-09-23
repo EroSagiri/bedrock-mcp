@@ -52,6 +52,29 @@ async function narrowPrefixes(ctx: McpRegistrationContext, excluded: string | un
 }
 
 export function registerSearchTools(ctx: McpRegistrationContext): void {
+    /**
+     * Search by meaning, as a tool of its own.
+     *
+     * It is deliberately not a mode of `search_text`. Full text can only miss a document; a vector search
+     * can also return a passage that no longer describes the note, so the two have genuinely different
+     * failure modes, and a caller that cannot tell them apart cannot tell a bad answer from an absent
+     * one. The result carries `filteredCandidates` for the same reason: hits the index offered and the
+     * Vault refused are not the same thing as hits that were never there.
+     */
+    registerToolCompat(ctx.server,
+      "search_semantic",
+      {
+        query: z.string().min(1).describe("自然语言查询；按语义而非字面匹配"),
+        limit: z.number().int().min(1).max(50).optional(),
+        prefix: z.string().optional().describe("只在该路径前缀内检索，例如 'daily/'"),
+      },
+      async ({ query, limit, prefix }) => {
+        const result = await ctx.env.vault.searchSemantic({ query, limit, prefix });
+        if (!result) return err("此 Vault 未配置向量索引，无法做语义检索");
+        if (result.error) return err(JSON.stringify(result, null, 2));
+        return ok(JSON.stringify(result, null, 2));
+      }
+    );
 
     // 全文检索（暴力扫描，适合小型 vault）
     registerToolCompat(ctx.server,

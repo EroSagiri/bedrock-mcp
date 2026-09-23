@@ -8,7 +8,7 @@ import type {
   VaultRpcDocument,
   VaultRpcDocumentMetadata,
 } from "@mineral/core/vault-rpc";
-import { createVaultService, type VaultDocumentMetadata, type VaultService, type VaultWriteResult } from "./service";import type { VaultIndex } from "./durable/vault-index";
+import { createVaultService, type VaultDocumentMetadata, type VaultService, type VaultWriteResult } from "./service";import type { VaultIndex, VectorizeBinding } from "./durable/vault-index";
 import { createMutationIngress, handleJournalStateRequest, handleMutationIngressRequest, MutationIngressError } from "./mutation/http";
 import { parseCommittedMutation, recordCommittedMutationUntilRecorded, REPAIR_ATTEMPTS, type CommittedMutationInput } from "./mutation/committed";
 import { mutationLog } from "./mutation/ids";
@@ -19,8 +19,11 @@ import { isReportedMutation, type MutationVerdict, type ReportedMutation } from 
 import { createGatewayPublisher, type GatewayRpcBinding } from "./sync-publisher/gateway-rpc";
 import { drainSyncOutbox } from "./sync-publisher/publisher";
 import { drainDueIndex } from "./index/scheduler";
-import { runIndexAudit, type AuditIndex, type AuditRun } from "./index/audit-runner";
-import { runEmbeddingProbe, type EmbeddingBinding } from "./vector/embedding";
+import { runIndexAudit, type AuditIndex, type AuditRun, type AuditVectors } from "./index/audit-runner";
+import { runEmbeddingProbe, embedTexts, type EmbeddingBinding } from "./vector/embedding";
+import { drainDueVector } from "./vector/scheduler";
+import type { VectorApplyResult } from "./vector/publish";
+import type { DueVectorIntent, VectorClaim, VectorQueueSummary } from "./vector/store";
 
 /** The nightly audit schedule, in UTC: 19:30 UTC is 03:30 at +08:00. */
 export const NIGHTLY_AUDIT_CRON = "30 19 * * *";
@@ -43,6 +46,27 @@ type CommittedWrite =
   | { op: "put"; path: string; etag: string; size: number }
   | { op: "delete"; path: string; etag?: string };
 
+/**
+ * The Durable Object's vector surface, declared structurally.
+ *
+ * The entrypoint drives the vector layer over RPC and never imports the class the runtime constructs, so
+ * the surface it depends on is written out here — the same shape the object implements, and the same
+ * reason `AuditIndex` exists next to the note index.
+ */
+type VectorIndexSurface = {
+  applyIndexIntent(input: { path: string; action: "upsert" | "remove" }): Promise<{ applied: true; indexedEtag: string | null; status: string } | { applied: false; error: string }>;
+  applyVectorIntent(input: { path: string; action: "upsert" | "remove" }): Promise<VectorApplyResult>;
+  collectVectorGarbage(limit: number): Promise<number>;
+  enqueueStaleVectors(now: number): Promise<number>;
+  pendingVectorSummary(now: number): Promise<VectorQueueSummary>;
+  listDueVectorPaths(now: number, limit: number): Promise<DueVectorIntent[]>;
+  claimPendingVector(input: { path: string; etag: string | null; action: "upsert" | "remove"; now: number }): Promise<VectorClaim>;
+  completeVector(input: { path: string; etag: string | null; action: "upsert" | "remove" }): Promise<boolean>;
+  failVector(input: { path: string; etag: string | null; action: "upsert" | "remove"; error: string; notBefore: number }): Promise<void>;
+  vectorHealth(): Promise<Record<string, unknown>>;
+  searchSemantic(input: { vector: number[]; limit: number; prefix: string }): Promise<Record<string, unknown>>;
+};
+
 // The destination Worker must ship this class when it receives the existing
 // VaultIndex namespace through a legacy transfer migration.
 export { VaultIndex } from "./durable/vault-index";
@@ -57,6 +81,14 @@ export type VaultWorkerEnv = {
    * path works, and the probe reports the binding as missing rather than failing to start.
    */
   AI?: EmbeddingBinding;
+  /**
+   * Vectorize, for the semantic index.
+   *
+   * Optional for the same reason the AI binding is: a deployment without it keeps working, the vector
+   * drain reports the missing binding as a failure, and semantic search says so instead of returning an
+   * empty result that looks like an answer.
+   */
+  VECTORIZE?: VectorizeBinding;
   MUTATION_INGRESS_TOKEN?: string;
   SYNC_GATEWAY?: GatewayRpcBinding;
   SYNC_GATEWAY_URL?: string;
@@ -119,6 +151,38 @@ export default class VaultEntrypoint extends WorkerEntrypoint<VaultWorkerEnv> {
       console.error(`mutation report failed id=${event.id} error=${error instanceof Error ? error.message.slice(0, 200) : "unknown"}`);
       return { verdict: "refused", reason: "unavailable" };
     }
+  }
+
+  /**
+   * Semantic search, as its own surface rather than a mode of the text search.
+   *
+   * The query is embedded here, because the AI binding is a Worker binding, and everything after that —
+   * the Vectorize query and the acceptance rule that decides whether a retrieved chunk may be shown —
+   * happens inside the Durable Object, where the ledger is. A refused candidate and a missing one look
+   * the same to a caller, which is why the result reports how many were filtered.
+   */
+  async searchSemantic(input: { query: string; limit?: number; prefix?: string }): Promise<Record<string, unknown>> {
+    const query = String(input?.query ?? "").trim();
+    if (!query) return { error: "empty_query" };
+    const embeddings = this.embeddings();
+    if (!embeddings) return { error: "ai_binding_missing" };
+    let vector: number[] | undefined;
+    try {
+      [vector] = await embedTexts(embeddings, [query]);
+    } catch (error) {
+      return { error: "embedding_failed", detail: error instanceof Error ? error.message.slice(0, 200) : "unknown" };
+    }
+    if (!vector) return { error: "embedding_failed" };
+    return this.vectorIndex().searchSemantic({
+      vector,
+      limit: Math.min(Math.max(Number(input.limit ?? 20), 1), 50),
+      prefix: String(input.prefix ?? ""),
+    });
+  }
+
+  /** The vector index's health, for an operator. Read-only and aggregate: counts, never a path. */
+  async vectorHealth(): Promise<Record<string, unknown>> {
+    return this.vectorIndex().vectorHealth();
   }
 
   async getDocument(key: string): Promise<VaultRpcDocument | null> {
@@ -204,6 +268,16 @@ export default class VaultEntrypoint extends WorkerEntrypoint<VaultWorkerEnv> {
   }
 
   /**
+   * The Workers AI binding, as an overridable seam.
+   *
+   * Miniflare simulates neither Workers AI nor Vectorize locally, so a test that wants to exercise the
+   * real RPC surface supplies its own embedding here. Production returns the binding, unchanged.
+   */
+  protected embeddings(): EmbeddingBinding | undefined {
+    return this.env.AI;
+  }
+
+  /**
    * Measures the embedding model instead of trusting its documentation.
    *
    * A Vectorize index is created with a width and a metric and can never change them, so the real output
@@ -211,7 +285,7 @@ export default class VaultEntrypoint extends WorkerEntrypoint<VaultWorkerEnv> {
    * binding the publish path will use.
    */
   async probeEmbeddingModel(model?: string): Promise<Record<string, unknown>> {
-    return { ...(await runEmbeddingProbe(this.env.AI, model)) };
+    return { ...(await runEmbeddingProbe(this.embeddings(), model)) };
   }
 
   /**
@@ -231,6 +305,7 @@ export default class VaultEntrypoint extends WorkerEntrypoint<VaultWorkerEnv> {
       try {
         const run = await this.runAudit();
         mutationLog("index audit finished", { count: run.scanned, attempts: run.enqueued });
+        mutationLog("vector audit finished", { count: run.vectorsEnqueued, attempts: run.vectorsApplied, chunks: run.vectorsCollected });
       } catch (error) {
         console.error(`index audit failed error=${error instanceof Error ? error.message.slice(0, 200) : "unknown"}`);
       }
@@ -245,9 +320,37 @@ export default class VaultEntrypoint extends WorkerEntrypoint<VaultWorkerEnv> {
    * work at a time; the loop, the bounded page count and the per-page drain belong to the caller.
    */
   private async runAudit(): Promise<AuditRun> {
+    const index = this.vectorIndex();
+    return runIndexAudit({ journal: this.journal(), index: index as unknown as AuditIndex, vectors: this.vectorAuditSurface(index) });
+  }
+
+  /** The single named Durable Object, as the vector surface its callers need. */
+  private vectorIndex(): VectorIndexSurface {
     const namespace = this.env.VAULT_INDEX;
-    const index = namespace.get(namespace.idFromName("vault")) as unknown as AuditIndex;
-    return runIndexAudit({ journal: this.journal(), index });
+    return namespace.get(namespace.idFromName("vault")) as unknown as VectorIndexSurface;
+  }
+
+  /**
+   * The vector half of the audit, wired to the same Durable Object.
+   *
+   * The queue surface and the indexer are the object's own methods, so an audit drives the vector layer
+   * through exactly the path a live write does — the audit adds work, never a second way to do it.
+   */
+  private vectorAuditSurface(index: VectorIndexSurface): AuditVectors {
+    return {
+      queue: {
+        pendingVectorSummary: now => index.pendingVectorSummary(now),
+        listDueVectorPaths: (now, limit) => index.listDueVectorPaths(now, limit),
+        claimPendingVector: input => index.claimPendingVector(input),
+        completeVector: input => index.completeVector(input),
+        failVector: input => index.failVector(input),
+      },
+      indexer: {
+        apply: intent => index.applyVectorIntent(intent),
+        collectGarbage: limit => index.collectVectorGarbage(limit),
+      },
+      sweep: now => index.enqueueStaleVectors(now),
+    };
   }
 
   /**
@@ -327,18 +430,40 @@ export default class VaultEntrypoint extends WorkerEntrypoint<VaultWorkerEnv> {
       console.error(`sync outbox drain failed id=${mutationId ?? ""} error=${error instanceof Error ? error.message.slice(0, 200) : "unknown"}`);
     }
     if (this.env.INDEXING_ENABLED === "false") return;
+    const index = this.vectorIndex();
     try {
-      const namespace = this.env.VAULT_INDEX;
-      const indexer = {
-        async apply(intent: { path: string; action: "upsert" | "remove" }) {
-          const stub = namespace.get(namespace.idFromName("vault")) as unknown as VaultIndex;
-          return stub.applyIndexIntent(intent);
-        },
-      };
-      await drainDueIndex({ journal, indexer });
+      await drainDueIndex({
+        journal,
+        indexer: { apply: intent => index.applyIndexIntent(intent) },
+      });
     } catch (error) {
       console.error(`index drain failed id=${mutationId ?? ""} error=${error instanceof Error ? error.message.slice(0, 200) : "unknown"}`);
     }
+    // The note index drains first, and not only for latency: a semantic hit is only servable once the
+    // note index has published the same revision the vectors describe, so doing the cheap half first
+    // makes the expensive half immediately useful instead of one tick later.
+    try {
+      await drainDueVector({ queue: this.vectorQueue(index), indexer: this.vectorIndexer(index) });
+    } catch (error) {
+      console.error(`vector drain failed id=${mutationId ?? ""} error=${error instanceof Error ? error.message.slice(0, 200) : "unknown"}`);
+    }
+  }
+
+  private vectorQueue(index: VectorIndexSurface) {
+    return {
+      pendingVectorSummary: (now: number) => index.pendingVectorSummary(now),
+      listDueVectorPaths: (now: number, limit: number) => index.listDueVectorPaths(now, limit),
+      claimPendingVector: (input: { path: string; etag: string | null; action: "upsert" | "remove"; now: number }) => index.claimPendingVector(input),
+      completeVector: (input: { path: string; etag: string | null; action: "upsert" | "remove" }) => index.completeVector(input),
+      failVector: (input: { path: string; etag: string | null; action: "upsert" | "remove"; error: string; notBefore: number }) => index.failVector(input),
+    };
+  }
+
+  private vectorIndexer(index: VectorIndexSurface) {
+    return {
+      apply: (intent: { path: string; action: "upsert" | "remove" }) => index.applyVectorIntent(intent),
+      collectGarbage: (limit: number) => index.collectVectorGarbage(limit),
+    };
   }
 
   /**
@@ -370,6 +495,9 @@ export default class VaultEntrypoint extends WorkerEntrypoint<VaultWorkerEnv> {
         const stub = namespace.get(namespace.idFromName("vault")) as unknown as VaultIndex;
         return stub.journalState();
       });
+    }
+    if (url.pathname === "/internal/vector-health" && request.method === "GET") {
+      return handleJournalStateRequest(request, this.env, () => this.vectorHealth());
     }
     if (url.pathname !== "/internal/mutations" || request.method !== "POST") return new Response("Not found", { status: 404 });
     const ingress = createMutationIngress(this.env, this.journal(), this.service().mutations);
