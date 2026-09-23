@@ -11,6 +11,7 @@ import type {
 import { createVaultService, type VaultDocumentMetadata, type VaultService, type VaultWriteResult } from "./service";import type { VaultIndex } from "./durable/vault-index";
 import { createMutationIngress, handleMutationIngressRequest } from "./mutation/http";
 import { parseCommittedMutation, recordCommittedMutationUntilRecorded, REPAIR_ATTEMPTS, type CommittedMutationInput } from "./mutation/committed";
+import { mutationLog } from "./mutation/ids";
 import type { MutationRecorder } from "./mutation/recorder";
 import type { MutationJournal } from "./mutation/store";
 import type { MutationEvent } from "./mutation/types";
@@ -213,11 +214,20 @@ export default class VaultEntrypoint extends WorkerEntrypoint<VaultWorkerEnv> {
   /**
    * The gateway channel is derived, never configured: it must equal the channel the Obsidian
    * clients compute from the same R2 namespace, or the broadcast reaches nobody.
+   *
+   * Because a channel is a digest, a *wrong* namespace does not fail — it silently publishes to a
+   * channel no client subscribes to. The one value that is guaranteed wrong is wrangler.jsonc's
+   * placeholder, so it is treated as "not configured at all" and the publisher reports itself
+   * disabled instead of digesting a namespace that nobody uses.
    */
   private async gatewayChannel(): Promise<string | null> {
     const endpoint = this.env.MINERAL_R2_ENDPOINT;
     const bucket = this.env.MINERAL_BUCKET;
     if (!endpoint || !bucket) return null;
+    if (!/^https?:\/\//i.test(endpoint) || /(^|\.)example\.r2\.cloudflarestorage\.com$/i.test(new URL(endpoint).hostname)) {
+      mutationLog("mutation broadcast channel unconfigured", {});
+      return null;
+    }
     const { deriveRemoteChangeChannel } = await import("@mineral/sync-core/channel");
     return deriveRemoteChangeChannel({ endpoint, bucket, remotePrefix: this.env.MINERAL_REMOTE_PREFIX ?? "" });
   }
