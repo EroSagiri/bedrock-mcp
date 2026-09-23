@@ -94,8 +94,9 @@ export async function recordVerifiedMutation(
 ): Promise<IngressOutcome> {
   const digest = await pathDigest(event.path);
   if (await dependencies.journal.findByMutationId(event.id)) {
+    // The recorder logs the duplicate itself (`mutation duplicate ignored`), so this path adds none:
+    // one retry must never produce two lines about the same fact.
     const replay = await dependencies.recorder.record(event);
-    mutationLog("mutation duplicate ignored", { id: event.id, seq: replay.seq, source: event.source, op: event.op, pathDigest: digest });
     return { status: "duplicate", record: replay };
   }
   const observed = await dependencies.verifier.observe(event.path);
