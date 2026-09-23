@@ -7,6 +7,9 @@
   "observability": { "enabled": true },
   "upload_source_maps": true,
   "triggers": { "crons": ["0 */2 * * *"] },
+  "routes": [
+    { "pattern": "vault.mineral.sighjune.com", "custom_domain": true }
+  ],
   "r2_buckets": [
     { "binding": "MINERAL", "bucket_name": "mineral" }
   ],
@@ -29,7 +32,7 @@
   },
   "vars": {
     "INDEXING_ENABLED": "true",
-    "MINERAL_R2_ENDPOINT": "https://example.r2.cloudflarestorage.com",
+    "MINERAL_R2_ENDPOINT": "https://68b8b99e8abecd71aa2412b31c52b2b5.r2.cloudflarestorage.com",
     "MINERAL_BUCKET": "mineral",
     "MINERAL_REMOTE_PREFIX": ""
   }
