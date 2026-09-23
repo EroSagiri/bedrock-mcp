@@ -1,6 +1,6 @@
 export type RemoteGeneration = string;
 
-export type RemoteChangeSource = "obsidian" | "vault" | "unknown";
+export type RemoteChangeSource = "obsidian" | "vault" | "mcp" | "system" | "unknown";
 export type RemoteChangeKind = "upsert" | "delete" | "unknown";
 
 /** A bounded diagnostic hint; it never changes Hub correctness semantics. */

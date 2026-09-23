@@ -1,3 +1,4 @@
+import { SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { MemoryMutationStore } from "../apps/vault/src/index/memory-store";
 import { journalFromStore } from "../apps/vault/src/mutation/store";
@@ -5,7 +6,7 @@ import { createMutationRecorder } from "../apps/vault/src/mutation/recorder";
 import { createR2MutationVerifier, handleMutationIngressRequest, MutationIngressError } from "../apps/vault/src/mutation/http";
 import { isRemoteApply, parseIngressBody, recordVerifiedMutation, type MutationVerifier } from "../apps/vault/src/mutation/ingress";
 import type { MutationEvent } from "../apps/vault/src/mutation/types";
-import { bindings } from "./support";
+import { bindings, vaultIndex } from "./support";
 
 const encoder = new TextEncoder();
 
@@ -155,8 +156,8 @@ describe("POST /internal/mutations", () => {
   it("rejects an unauthenticated or unconfigured ingress", async () => {
     const ingressEnv = { MINERAL: bindings().MINERAL, MUTATION_INGRESS_TOKEN: "ingress-test-token" };
     const { service } = ingressFor();
-    expect((await handleMutationIngressRequest(post(putBody(), { authorization: "Bearer wrong" }), ingressEnv, service)).status).toBe(401);
-    expect((await handleMutationIngressRequest(post(putBody()), { MINERAL: bindings().MINERAL }, service)).status).toBe(503);
+    expect((await handleMutationIngressRequest(post(putBody(), { authorization: "Bearer wrong" }), ingressEnv, service)).response.status).toBe(401);
+    expect((await handleMutationIngressRequest(post(putBody()), { MINERAL: bindings().MINERAL }, service)).response.status).toBe(503);
   });
 
   function ingressFor(objects: Record<string, { etag: string; size: number }> = {}) {
@@ -177,22 +178,28 @@ describe("POST /internal/mutations", () => {
     const ingressEnv = { MINERAL: bindings().MINERAL, MUTATION_INGRESS_TOKEN: "ingress-test-token" };
     const accepted = ingressFor({ "notes/a.md": { etag: "E1", size: 10 } });
     const ok = await handleMutationIngressRequest(post(putBody()), ingressEnv, accepted.service);
-    expect(ok.status).toBe(202);
-    await expect(ok.json()).resolves.toMatchObject({ status: "accepted", seq: 1, mutationId: "mut_obsidian_1" });
+    expect(ok.response.status).toBe(202);
+    // The outcome tells the entrypoint there is now a fact to broadcast and index.
+    expect(ok).toMatchObject({ recorded: true, mutationId: "mut_obsidian_1" });
+    await expect(ok.response.json()).resolves.toMatchObject({ status: "accepted", seq: 1, mutationId: "mut_obsidian_1" });
 
     const mismatched = ingressFor({ "notes/a.md": { etag: "OTHER", size: 10 } });
-    expect((await handleMutationIngressRequest(post(putBody()), ingressEnv, mismatched.service)).status).toBe(409);
+    const rejected = await handleMutationIngressRequest(post(putBody()), ingressEnv, mismatched.service);
+    expect(rejected.response.status).toBe(409);
+    // A refused report recorded nothing, so it owes no drain.
+    expect(rejected.recorded).toBe(false);
 
     const invalid = ingressFor();
-    expect((await handleMutationIngressRequest(post("{"), ingressEnv, invalid.service)).status).toBe(400);
-    expect((await handleMutationIngressRequest(post(putBody(), { "content-length": "999999" }), ingressEnv, invalid.service)).status).toBe(413);
+    expect((await handleMutationIngressRequest(post("{"), ingressEnv, invalid.service)).response.status).toBe(400);
+    expect((await handleMutationIngressRequest(post(putBody(), { "content-length": "999999" }), ingressEnv, invalid.service)).response.status).toBe(413);
   });
 
   it("answers 204 for a remote apply instead of recording a fact", async () => {
     const ingressEnv = { MINERAL: bindings().MINERAL, MUTATION_INGRESS_TOKEN: "ingress-test-token" };
     const { service, store } = ingressFor({ "notes/a.md": { etag: "E1", size: 10 } });
-    const response = await handleMutationIngressRequest(post(putBody(), { "x-mineral-mutation-origin": "remote-apply" }), ingressEnv, service);
-    expect(response.status).toBe(204);
+    const outcome = await handleMutationIngressRequest(post(putBody(), { "x-mineral-mutation-origin": "remote-apply" }), ingressEnv, service);
+    expect(outcome.response.status).toBe(204);
+    expect(outcome.recorded).toBe(false);
     expect(store.snapshotJournal()).toHaveLength(0);
   });
 
@@ -203,8 +210,51 @@ describe("POST /internal/mutations", () => {
         throw new Error("journal unavailable");
       },
     };
-    const response = await handleMutationIngressRequest(post(putBody()), ingressEnv, failing);
-    expect(response.status).toBe(503);
-    await expect(response.json()).resolves.toMatchObject({ error: "journal_unavailable" });
+    const outcome = await handleMutationIngressRequest(post(putBody()), ingressEnv, failing);
+    expect(outcome.response.status).toBe(503);
+    expect(outcome.recorded).toBe(false);
+    await expect(outcome.response.json()).resolves.toMatchObject({ error: "journal_unavailable" });
+  });
+});
+
+/**
+ * The route must not be a dead end.
+ *
+ * A reported write owes exactly what a Vault-performed write owes: reach the gateway and reach the
+ * index. The response is still sent first — 202 means "durable", never "delivered" — but the entrypoint
+ * schedules the drain, so a report no longer waits for the next cron tick.
+ */
+describe("an accepted report still reaches the consumers", () => {
+  const ingress = { "content-type": "application/json", authorization: "Bearer ingress-test-token" };
+
+  it("records the fact and schedules the same follow-through as an MCP write", async () => {
+    await (vaultIndex() as unknown as { resetMutationState(): Promise<void> }).resetMutationState();
+    const key = "ingress-drain/logical-delete.md";
+    const id = "mut_ingress_drain";
+
+    // A logical delete of an object that is not in R2: it is a real report (the object is gone) with no
+    // revision claimed, which is the cheapest shape that is accepted without seeding R2 first.
+    const response = await SELF.fetch("https://vault.internal/internal/mutations", {
+      method: "POST",
+      headers: ingress,
+      body: JSON.stringify({ id, source: "obsidian", op: "delete", path: key, committedAt: Date.now() }),
+    });
+    expect(response.status).toBe(202);
+    await expect(response.json()).resolves.toMatchObject({ status: "accepted", mutationId: id });
+
+    // The fact is in the journal, and the drain the route scheduled has cleared the index debt for a
+    // `remove` (unlike an Obsidian put, which is debounced by 30s). The drain runs after the response,
+    // so it is observed by polling rather than assumed to be synchronous.
+    const index = vaultIndex() as unknown as {
+      findMutation(id: string): Promise<unknown>;
+      pendingSummary(now: number): Promise<{ due: number; upserts: number; removes: number }>;
+    };
+    await expect(index.findMutation(id)).resolves.toMatchObject({ id, op: "delete", path: key });
+    let summary = await index.pendingSummary(Date.now());
+    for (let attempt = 0; attempt < 40 && summary.removes > 0; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 25));
+      summary = await index.pendingSummary(Date.now());
+    }
+    expect(summary).toMatchObject({ removes: 0 });
   });
 });

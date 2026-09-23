@@ -1,6 +1,6 @@
 import { mutationLog } from "../mutation/ids";
 import type { MutationSource } from "../mutation/types";
-import { gatewayChangesFor, type GatewayPublisher, type GatewayPublishResult } from "./gateway-port";
+import { gatewayChangesFor, boundedError, type GatewayPublisher, type GatewayPublishResult } from "./gateway-port";
 
 /** The serializable request the gateway already understands, extended with the idempotency key. */
 export type GatewayDirtyRequest = {
@@ -57,8 +57,12 @@ export function createGatewayPublisher(config: GatewayPublisherConfig): GatewayP
       if (config.rpc) {
         try {
           const result = await config.rpc.markRemoteDirty(request);
-          return typeof result?.generation === "string" ? { ok: true, generation: result.generation } : { ok: false, kind: "malformed" };
-        } catch {
+          if (typeof result?.generation === "string") return { ok: true, generation: result.generation };
+          mutationLog("mutation broadcast rpc malformed", { id: event.mutationId });
+          return { ok: false, kind: "malformed" };
+        } catch (error) {
+          // The RPC boundary is where a binding misconfiguration shows up; a bare kind would hide it.
+          mutationLog("mutation broadcast rpc failed", { id: event.mutationId, error: boundedError(error).replace(/\s+/g, "_") });
           return { ok: false, kind: "transport" };
         }
       }

@@ -40,6 +40,8 @@ export type MutationLogFields = {
   gatewayGeneration?: string;
   attempts?: number;
   count?: number;
+  /** A classified failure, already shortened; never a body, a token, or a raw path. */
+  error?: string;
 };
 
 /** One structured line per fact. Values are scalars; no bodies, no raw paths, no credentials. */

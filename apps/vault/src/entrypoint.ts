@@ -236,6 +236,11 @@ export default class VaultEntrypoint extends WorkerEntrypoint<VaultWorkerEnv> {
     const url = new URL(request.url);
     if (url.pathname !== "/internal/mutations" || request.method !== "POST") return new Response("Not found", { status: 404 });
     const ingress = createMutationIngress(this.env, this.journal(), this.service().mutations);
-    return handleMutationIngressRequest(request, this.env, ingress);
+    const outcome = await handleMutationIngressRequest(request, this.env, ingress);
+    // A reported fact owes the same follow-through as a Vault-performed write: broadcast and index it.
+    // The drain runs after the response, so the caller's 202 still means "durable", not "delivered" —
+    // and an ingress report does not sit in the journal until the next cron tick.
+    if (outcome.recorded) this.ctx.waitUntil(this.drainConsumers(outcome.mutationId));
+    return outcome.response;
   }
 }

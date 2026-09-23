@@ -14,7 +14,13 @@
     { "binding": "MINERAL", "bucket_name": "mineral" }
   ],
   "services": [
-    { "binding": "SYNC_GATEWAY", "service": "mineral-sync-gateway" }
+    {
+      "binding": "SYNC_GATEWAY",
+      "service": "mineral-sync-gateway",
+      // The publisher speaks RPC, not HTTP. Binding the default export reaches the Gateway's fetch
+      // handler, which has no `markRemoteDirty` — the RPC method lives on the named entrypoint.
+      "entrypoint": "SyncGatewayEntrypoint"
+    }
   ],
   "durable_objects": {
     "bindings": [

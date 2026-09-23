@@ -61,6 +61,7 @@ export async function drainSyncOutbox(
     }
     if (!result.ok) {
       await journal.markBroadcast({ mutationId: entry.id, state: "pending", error: result.kind });
+      mutationLog("mutation broadcast failed", { id: entry.id, seq: entry.seq, pathDigest: digest, attempts });
       outcome.failed++;
       continue;
     }

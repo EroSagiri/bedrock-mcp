@@ -9,6 +9,7 @@
     "bindings": [{ "name": "REMOTE_CHANGE_HUB", "class_name": "RemoteChangeHub" }]
   },
   "exports": {
-    "RemoteChangeHub": { "type": "durable-object", "storage": "sqlite" }
+    "RemoteChangeHub": { "type": "durable-object", "storage": "sqlite" },
+    "SyncGatewayEntrypoint": { "type": "worker" }
   }
 }

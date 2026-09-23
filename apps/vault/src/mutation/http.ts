@@ -9,6 +9,19 @@ export type MutationIngressService = {
   record(event: MutationEvent): Promise<{ status: "accepted" | "duplicate"; seq: number }>;
 };
 
+/**
+ * An ingress response plus what it means for the consumers.
+ *
+ * `recorded` is the whole reason this is not just a `Response`: a report that created a fact still has
+ * to reach the gateway and the index, and the caller that holds `waitUntil` is the entrypoint, not this
+ * module. A rejected or ignored report records nothing and therefore owes nothing.
+ */
+export type MutationIngressOutcome = {
+  response: Response;
+  recorded: boolean;
+  mutationId?: string;
+};
+
 export type MutationIngressEnv = {
   MINERAL: R2Bucket;
   MUTATION_INGRESS_TOKEN?: string;
@@ -58,37 +71,41 @@ export function createMutationIngress(
  * - `409` the reported revision is not what R2 holds. Retrying the *report* will not help.
  * - `503` the journal could not commit, so the report **must** be retried; nothing is half-recorded.
  * - `204` a remote apply: bytes someone else already wrote are not a new fact.
+ *
+ * The caller is expected to drain the journal's consumers afterwards when `recorded` is true. Without
+ * that, a reported fact waits for the next cron tick — up to two hours — which would make the
+ * gateway's low-latency wake-up a lie for exactly the writers that use this route.
  */
 export async function handleMutationIngressRequest(
   request: Request,
   env: MutationIngressEnv,
   ingress: MutationIngressService,
-): Promise<Response> {
+): Promise<MutationIngressOutcome> {
   const json = (status: number, body: Record<string, unknown>) =>
     Response.json(body, { status, headers: { "Cache-Control": "no-store", "Content-Type": "application/json" } });
 
   // Without a configured secret the route stays closed; an unauthenticated mutation ingress would
   // let any caller invent facts about the vault.
-  if (!env.MUTATION_INGRESS_TOKEN) return json(503, { error: "ingress_disabled" });
+  if (!env.MUTATION_INGRESS_TOKEN) return { response: json(503, { error: "ingress_disabled" }), recorded: false };
   const authorization = request.headers.get("Authorization");
-  if (authorization !== `Bearer ${env.MUTATION_INGRESS_TOKEN}`) return json(401, { error: "unauthorized" });
+  if (authorization !== `Bearer ${env.MUTATION_INGRESS_TOKEN}`) return { response: json(401, { error: "unauthorized" }), recorded: false };
 
   const contentLength = request.headers.get("Content-Length");
-  if (contentLength && Number(contentLength) > MAX_MUTATION_INGRESS_BYTES) return json(413, { error: "too_large" });
+  if (contentLength && Number(contentLength) > MAX_MUTATION_INGRESS_BYTES) return { response: json(413, { error: "too_large" }), recorded: false };
   const raw = await request.text();
-  if (raw.length > MAX_MUTATION_INGRESS_BYTES) return json(413, { error: "too_large" });
+  if (raw.length > MAX_MUTATION_INGRESS_BYTES) return { response: json(413, { error: "too_large" }), recorded: false };
 
   const origin: MutationWriteOrigin = request.headers.get("X-Mineral-Mutation-Origin") === "remote-apply" ? "remote-apply" : "local-write";
-  if (isRemoteApply({ origin })) return new Response(null, { status: 204, headers: { "Cache-Control": "no-store" } });
+  if (isRemoteApply({ origin })) return { response: new Response(null, { status: 204, headers: { "Cache-Control": "no-store" } }), recorded: false };
 
   const event = parseIngressBody(raw);
-  if (!event) return json(400, { error: "invalid_request" });
+  if (!event) return { response: json(400, { error: "invalid_request" }), recorded: false };
   try {
     const result = await ingress.record(event);
-    return json(202, { status: result.status, seq: result.seq, mutationId: event.id });
+    return { response: json(202, { status: result.status, seq: result.seq, mutationId: event.id }), recorded: true, mutationId: event.id };
   } catch (error) {
-    if (error instanceof MutationIngressError) return json(error.status, { error: error.reason, mutationId: event.id });
+    if (error instanceof MutationIngressError) return { response: json(error.status, { error: error.reason, mutationId: event.id }), recorded: false };
     console.error(`mutation ingress failed id=${event.id} error=${error instanceof Error ? error.message.slice(0, 200) : "unknown"}`);
-    return json(503, { error: "journal_unavailable", mutationId: event.id });
+    return { response: json(503, { error: "journal_unavailable", mutationId: event.id }), recorded: false };
   }
 }

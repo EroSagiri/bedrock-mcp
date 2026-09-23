@@ -3,7 +3,14 @@ import { isRemoteChangeChannel } from "./channel";
 
 const MAX_HINT_BYTES = 8 * 1024;
 const keys = new Set(["source", "kind", "writerId", "pathHash", "mutationId", "changes"]);
-const sources = new Set(["obsidian", "vault", "unknown"]);
+/**
+ * The writer identities a hint may name.
+ *
+ * `mcp` and `system` are here because the Vault's Mutation Journal is now a writer: it forwards the
+ * source of the fact it recorded, so a write performed over MCP is announced as `mcp`. The field is
+ * diagnostic only — rejecting a legitimate writer over its label would drop a real wake-up.
+ */
+const sources = new Set(["obsidian", "vault", "mcp", "system", "unknown"]);
 const kinds = new Set(["upsert", "delete", "unknown"]);
 const validPath = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 4096 && !value.startsWith("/") && !value.includes("\0");
 function validChange(value: unknown): value is RemoteChange {
