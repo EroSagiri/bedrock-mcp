@@ -9,15 +9,25 @@ import { isRemoteChangeChannel } from "./channel.js";
  * must therefore never be able to translate a Gateway frame into a sync operation; it can only
  * learn that remote state *may* have changed.
  */
-export const SUBSCRIBE_MESSAGE_TYPES = ["current-generation", "remote-dirty"] as const;
+export const SUBSCRIBE_MESSAGE_TYPES = ["current-generation", "remote-dirty", "remote-change"] as const;
 export type SubscribeMessageType = (typeof SUBSCRIBE_MESSAGE_TYPES)[number];
 
 export type CurrentGenerationMessage = { type: "current-generation"; generation: RemoteGeneration };
 export type RemoteDirtyMessage = { type: "remote-dirty"; generation: RemoteGeneration };
-export type SubscribeMessage = CurrentGenerationMessage | RemoteDirtyMessage;
+export type RemoteChangeMessage = { type: "remote-change"; generation: RemoteGeneration; changes: import("./sync-change.js").RemoteChange[] };
+export type SubscribeMessage = CurrentGenerationMessage | RemoteDirtyMessage | RemoteChangeMessage;
 
 const types = new Set<string>(SUBSCRIBE_MESSAGE_TYPES);
-const keys = new Set(["type", "generation"]);
+const baseKeys = new Set(["type", "generation"]);
+const changeKeys = new Set(["type", "generation", "changes"]);
+const path = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 4096 && !value.startsWith("/") && !value.includes("\0");
+function validChange(value: unknown): value is RemoteChangeMessage["changes"][number] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const change = value as Record<string, unknown>;
+  if (change.op === "put") return Object.keys(change).every(key => ["op", "path", "etag", "size", "modified"].includes(key)) && path(change.path) && (change.etag === undefined || typeof change.etag === "string") && (change.size === undefined || typeof change.size === "number") && (change.modified === undefined || typeof change.modified === "string");
+  if (change.op === "delete") return Object.keys(change).every(key => key === "op" || key === "path") && path(change.path);
+  return change.op === "rename" && Object.keys(change).every(key => ["op", "from", "to", "etag"].includes(key)) && path(change.from) && path(change.to) && (change.etag === undefined || typeof change.etag === "string");
+}
 
 function parseJson(payload: string | ArrayBuffer | Uint8Array): unknown {
   if (typeof payload === "string") { try { return JSON.parse(payload); } catch { return undefined; } }
@@ -40,12 +50,14 @@ export function parseSubscribeMessage(payload: string | ArrayBuffer | Uint8Array
   const value = parseJson(payload);
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const candidate = value as Record<string, unknown>;
-  if (Object.keys(candidate).some((key) => !keys.has(key))) return undefined;
+  const isChange = candidate.type === "remote-change";
+  if (Object.keys(candidate).some((key) => !(isChange ? changeKeys : baseKeys).has(key))) return undefined;
   if (typeof candidate.type !== "string" || !types.has(candidate.type)) return undefined;
   if (!isRemoteGeneration(candidate.generation)) return undefined;
-  return candidate.type === "current-generation"
-    ? { type: "current-generation", generation: candidate.generation }
-    : { type: "remote-dirty", generation: candidate.generation };
+  if (candidate.type === "current-generation") return { type: "current-generation", generation: candidate.generation };
+  if (candidate.type === "remote-dirty") return { type: "remote-dirty", generation: candidate.generation };
+  if (!Array.isArray(candidate.changes) || candidate.changes.length > 128 || !candidate.changes.every(validChange)) return undefined;
+  return { type: "remote-change", generation: candidate.generation, changes: candidate.changes };
 }
 
 /** Kept for symmetry with channel validation in diagnostics and tests. */

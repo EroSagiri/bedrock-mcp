@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import type { MarkRemoteDirtyResult, RemoteGeneration } from "@mineral/sync-core/sync-change";
+import type { MarkRemoteDirtyRequest, MarkRemoteDirtyResult, RemoteGeneration } from "@mineral/sync-core/sync-change";
 
 const GENERATION_KEY = "generation";
 const noStore = { "Cache-Control": "no-store" };
@@ -13,14 +13,14 @@ export class RemoteChangeHub extends DurableObject {
     return { generation: (await this.generation()).toString() };
   }
 
-  async markDirty(): Promise<MarkRemoteDirtyResult> {
+  async markDirty(input: Pick<MarkRemoteDirtyRequest, "changes"> = {}): Promise<MarkRemoteDirtyResult> {
     const generation = await this.ctx.storage.transaction(async transaction => {
       const current = BigInt((await transaction.get<string>(GENERATION_KEY)) ?? "0");
       const next = (current + 1n).toString();
       await transaction.put(GENERATION_KEY, next);
       return next;
     });
-    this.broadcast(generation);
+    this.broadcast(generation, input.changes);
     return { generation };
   }
 
@@ -42,10 +42,11 @@ export class RemoteChangeHub extends DurableObject {
     // The runtime handles the close reply; no per-socket state is retained.
   }
 
-  private broadcast(generation: RemoteGeneration): void {
+  private broadcast(generation: RemoteGeneration, changes: MarkRemoteDirtyRequest["changes"]): void {
+    const scoped = changes?.length ? JSON.stringify({ type: "remote-change", generation, changes }) : undefined;
     const payload = JSON.stringify({ type: "remote-dirty", generation });
     for (const socket of this.ctx.getWebSockets()) {
-      try { socket.send(payload); } catch { try { socket.close(1011, "send failed"); } catch {} }
+      try { if (scoped) socket.send(scoped); socket.send(payload); } catch { try { socket.close(1011, "send failed"); } catch {} }
     }
   }
 }

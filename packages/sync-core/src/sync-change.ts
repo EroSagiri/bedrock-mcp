@@ -11,8 +11,16 @@ export type RemoteChangeHint = {
   pathHash?: string;
 };
 
+/** A bounded, path-scoped fact accompanying one gateway generation. */
+export type RemoteChange =
+  | { op: "put"; path: string; etag?: string; size?: number; modified?: string }
+  | { op: "delete"; path: string }
+  | { op: "rename"; from: string; to: string; etag?: string };
+
 export type MarkRemoteDirtyRequest = RemoteChangeHint & {
   channel: string;
+  /** Omitted means a compatibility-only level-triggered wake-up. */
+  changes?: RemoteChange[];
 };
 
 export type MarkRemoteDirtyResult = { generation: RemoteGeneration };
