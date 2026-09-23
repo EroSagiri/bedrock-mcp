@@ -27,7 +27,7 @@ function route(pathname: string): { channel: string; action: "read" | "dirty" | 
 
 export async function markRemoteDirtyInternal(env: GatewayEnv, input: MarkRemoteDirtyRequest): Promise<MarkRemoteDirtyResult> {
   if (!validRpcRequest(input)) throw new TypeError("invalid markRemoteDirty request");
-  return env.REMOTE_CHANGE_HUB.getByName(input.channel).markDirty({ changes: input.changes });
+  return env.REMOTE_CHANGE_HUB.getByName(input.channel).markDirty({ changes: input.changes, mutationId: input.mutationId });
 }
 
 export class SyncGatewayEntrypoint extends WorkerEntrypoint<GatewayEnv> {

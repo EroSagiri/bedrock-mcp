@@ -9,6 +9,14 @@ export type RemoteChangeHint = {
   kind?: RemoteChangeKind;
   writerId?: string;
   pathHash?: string;
+  /**
+   * The writer's mutation idempotency key.
+   *
+   * A writer that retries a notification whose response was lost must not create a second
+   * generation, so the Hub remembers `mutationId → generation` for a bounded window and replays the
+   * original answer. It is optional: a client that does not send one keeps the legacy behaviour.
+   */
+  mutationId?: string;
 };
 
 /** A bounded, path-scoped fact accompanying one gateway generation. */

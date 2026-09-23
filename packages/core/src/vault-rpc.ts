@@ -25,6 +25,26 @@ export type PutDocumentInput = {
   customMetadata?: Record<string, string>;
 };
 
+/**
+ * The revision a write committed, plus the journal fact that records it.
+ *
+ * `mutationPending` means R2 committed but the mutation fact could not be written; a caller that
+ * cares about downstream delivery can retry the same operation, which is idempotent by
+ * `mutationId`.
+ */
+export type PutDocumentResult = {
+  etag: string;
+  size: number;
+  mutationId: string;
+  mutationSeq: number;
+  mutationPending: boolean;
+};
+
+export type DeleteDocumentsResult = {
+  deleted: string[];
+  mutationPending: boolean;
+};
+
 export type ListDocumentsInput = {
   prefix?: string;
   cursor?: string;
@@ -43,8 +63,8 @@ export type VaultRpc = {
   getDocument(key: string): Promise<VaultRpcDocument | null>;
   headDocument(key: string): Promise<VaultRpcDocumentMetadata | null>;
   listDocuments(input?: ListDocumentsInput): Promise<ListDocumentsResult>;
-  putDocument(input: PutDocumentInput): Promise<void>;
-  deleteDocuments(keys: string | string[]): Promise<void>;
+  putDocument(input: PutDocumentInput): Promise<PutDocumentResult>;
+  deleteDocuments(keys: string | string[]): Promise<DeleteDocumentsResult>;
   backupTextDocument(key: string, text: string, contentType?: string): Promise<string>;
   moveDocument(from: string, to: string): Promise<void>;
   queryIndex(kind: string, input: Record<string, unknown>): Promise<Record<string, unknown>>;

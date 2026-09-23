@@ -1,6 +1,10 @@
 import { isTextDocumentKey } from "@mineral/core/keys";
 import { extractTags, extractWikilinks, frontmatterTags, parseFrontmatter } from "@mineral/core/markdown";
 import { DurableObject } from "cloudflare:workers";
+import { SqlMutationStore, type SqlDatabase } from "../index/journal-store";
+import type { IndexAction, IndexIntentSpec } from "../index/intents";
+import type { DueIndexIntent, IndexClaim, PendingIndexSummary, RecordMutationResult } from "../mutation/store";
+import type { JournalEntry, MutationEvent } from "../mutation/types";
 
 type Env = { MINERAL: R2Bucket };
 type Row = Record<string, unknown>;
@@ -9,12 +13,22 @@ const isIndexable = (key: string) => isTextDocumentKey(key) && !SYSTEM.some(pref
 const rows = (result: Iterable<Row>) => [...result];
 
 /**
- * The single, named instance is a rebuildable projection of MINERAL.  It never
- * stores document bodies; only metadata extracted while reading changed objects.
+ * The single, named instance holds two different things that must not be conflated:
+ *
+ * - the **note index** — a rebuildable projection of MINERAL, which never stores document bodies;
+ * - the **Mutation Journal** and its materialised `pending_index` dirty set — durable facts about
+ *   authoritative R2 writes and the index work still owed for them.
+ *
+ * They live in one SQLite instance because `recordMutation()` must commit the journal fact and its
+ * index intents together, and because the incremental indexer is the natural consumer of those
+ * intents. The journal is never used as a work queue, and the dirty set is never used as a history.
  */
 export class VaultIndex extends DurableObject<Env> {
+  private readonly mutations: SqlMutationStore;
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
+    this.mutations = new SqlMutationStore(this.ctx.storage.sql as unknown as SqlDatabase);
     ctx.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS index_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS documents (generation INTEGER NOT NULL, key TEXT NOT NULL, etag TEXT NOT NULL, modified TEXT NOT NULL, size INTEGER NOT NULL, content_type TEXT, PRIMARY KEY (generation, key));
@@ -29,12 +43,119 @@ export class VaultIndex extends DurableObject<Env> {
     `);
   }
 
+  /**
+   * Test-only: drops the journal and the dirty set.
+   *
+   * It exists because the durable tests run against the real single named instance, and each case
+   * must start from an empty journal. It deliberately touches neither the note index nor the
+   * generation counters.
+   */
+  async resetMutationState(): Promise<void> {
+    this.ctx.storage.sql.exec("DELETE FROM mutation_journal; DELETE FROM pending_index;");
+  }
+
   private getMeta(key: string): string | null {
     return rows(this.ctx.storage.sql.exec("SELECT value FROM index_meta WHERE key = ?", key))[0]?.value as string | undefined ?? null;
   }
   private setMeta(key: string, value: string): void { this.ctx.storage.sql.exec("INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)", key, value); }
   private active(): number { return Number(this.getMeta("active_generation") ?? "0"); }
-  private freshness() { return { generation: this.active(), indexedAt: this.getMeta("indexed_at"), freshness: "eventual" as const }; }
+  private freshness() {
+    return {
+      generation: this.active(),
+      indexedAt: this.getMeta("indexed_at"),
+      /** The freshest revision this note index has actually observed; compared with R2 for staleness. */
+      indexedEtag: this.getMeta("indexed_etag"),
+      freshness: "eventual" as const,
+    };
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Mutation ingress: the only path that writes a mutation fact.
+  // ---------------------------------------------------------------------------------------------
+
+  /**
+   * `recordMutation()`'s durable half.
+   *
+   * The caller has already computed the index intents (`indexIntentsFor`); this method owns only the
+   * atomicity: the fact and its intents commit in one transaction, so a crash between them is
+   * impossible and a caller that sees a failure knows the whole write was abandoned.
+   */
+  async recordMutation(input: { event: MutationEvent; intents: IndexIntentSpec[] }): Promise<RecordMutationResult> {
+    return this.ctx.storage.transactionSync(() => this.mutations.recordWithinTransaction(input.event, input.intents));
+  }
+
+  async findMutation(mutationId: string): Promise<JournalEntry | null> {
+    return this.mutations.findByMutationId(mutationId);
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Sync Publisher: outbox reads and delivery bookkeeping.
+  // ---------------------------------------------------------------------------------------------
+
+  async listPendingBroadcasts(limit: number): Promise<JournalEntry[]> {
+    return this.mutations.listPendingBroadcasts(limit);
+  }
+
+  async markBroadcast(input: { mutationId: string; state: "published" | "pending"; generation?: string; error?: string }): Promise<void> {
+    this.mutations.markBroadcast(input);
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Index Scheduler: the durable dirty set.
+  // ---------------------------------------------------------------------------------------------
+
+  async pendingSummary(now: number): Promise<PendingIndexSummary> {
+    return this.mutations.pendingSummary(now);
+  }
+
+  async listDueIndexPaths(now: number, limit: number): Promise<DueIndexIntent[]> {
+    return this.mutations.listDueIndexPaths(now, limit);
+  }
+
+  async claimPendingIndex(input: { path: string; etag: string | null; action: IndexAction; now: number }): Promise<IndexClaim> {
+    return this.mutations.claimPendingIndex(input);
+  }
+
+  async completeIndex(input: { path: string; etag: string | null; action: IndexAction }): Promise<boolean> {
+    return this.mutations.completeIndex(input);
+  }
+
+  async failIndex(input: { path: string; etag: string | null; action: IndexAction; error: string; notBefore: number }): Promise<void> {
+    this.mutations.failIndex(input);
+  }
+
+  /**
+   * Applies one index intent against **current R2**, which is the only authoritative revision.
+   *
+   * The intent's `target_etag` is a hint about what the caller believed was owed; it is never
+   * indexed directly. If R2 has already moved to a newer revision, that newer revision is what gets
+   * indexed, and the returned `indexedEtag` records what was actually observed.
+   */
+  async applyIndexIntent(input: { path: string; action: IndexAction }): Promise<{ applied: true; indexedEtag: string | null } | { applied: false; error: string }> {
+    const generation = this.active();
+    try {
+      if (!isIndexable(input.path)) {
+        this.removeDocument(generation, input.path);
+        return { applied: true, indexedEtag: null };
+      }
+      const object = await this.env.MINERAL.get(input.path);
+      if (!object) {
+        this.removeDocument(generation, input.path);
+        return { applied: true, indexedEtag: null };
+      }
+      if (rows(this.ctx.storage.sql.exec("SELECT etag FROM documents WHERE generation = ? AND key = ?", generation, input.path))[0]?.etag === object.etag) {
+        this.setMeta("indexed_etag", object.etag);
+        return { applied: true, indexedEtag: object.etag };
+      }
+      this.removeDocument(generation, input.path);
+      this.indexDocument(generation, object, await object.text());
+      this.setMeta("indexed_at", new Date().toISOString());
+      this.setMeta("indexed_etag", object.etag);
+      return { applied: true, indexedEtag: object.etag };
+    } catch (error) {
+      return { applied: false, error: error instanceof Error ? error.message.slice(0, 200) : "index apply failed" };
+    }
+  }
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
@@ -42,6 +163,7 @@ export class VaultIndex extends DurableObject<Env> {
     const input = await request.json<Record<string, unknown>>();
     if (url.pathname === "/refresh") return Response.json(await this.refresh());
     if (url.pathname === "/query") return Response.json(this.query(String(input.kind ?? ""), input));
+    if (url.pathname === "/mutation/summary") return Response.json(this.mutations.pendingSummary(Date.now()));
     return new Response("Not found", { status: 404 });
   }
 
@@ -61,6 +183,14 @@ export class VaultIndex extends DurableObject<Env> {
     this.ctx.storage.sql.exec("INSERT INTO frontmatter_values SELECT ?, document_key, field, value FROM frontmatter_values WHERE generation=? AND document_key=?", to, from, key);
     this.ctx.storage.sql.exec("INSERT INTO document_tags SELECT ?, document_key, tag, source, occurrences FROM document_tags WHERE generation=? AND document_key=?", to, from, key);
     this.ctx.storage.sql.exec("INSERT INTO links SELECT ?, from_key, to_key FROM links WHERE generation=? AND from_key=?", to, from, key);
+  }
+
+  /** Drops every derived row for one key at one generation. Shared by delete and by re-index. */
+  private removeDocument(generation: number, key: string): void {
+    this.ctx.storage.sql.exec("DELETE FROM documents WHERE generation = ? AND key = ?", generation, key);
+    this.ctx.storage.sql.exec("DELETE FROM frontmatter_values WHERE generation = ? AND document_key = ?", generation, key);
+    this.ctx.storage.sql.exec("DELETE FROM document_tags WHERE generation = ? AND document_key = ?", generation, key);
+    this.ctx.storage.sql.exec("DELETE FROM links WHERE generation = ? AND from_key = ?", generation, key);
   }
 
   private indexDocument(generation: number, object: R2Object, text: string): void {

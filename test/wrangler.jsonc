@@ -1,14 +1,28 @@
 {
-  "$schema": "../node_modules/wrangler/config-schema.json",
-  "name": "mineral-sync-gateway-test",
-  "main": "../apps/sync-gateway/src/index.ts",
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "mineral-integration-test",
+  "main": "./worker/index.ts",
   "compatibility_date": "2026-04-28",
   "compatibility_flags": ["nodejs_compat"],
   "durable_objects": {
-    "bindings": [{ "name": "REMOTE_CHANGE_HUB", "class_name": "RemoteChangeHub" }]
+    "bindings": [
+      { "name": "REMOTE_CHANGE_HUB", "class_name": "RemoteChangeHub" },
+      { "name": "VAULT_INDEX", "class_name": "VaultIndex" }
+    ]
   },
   "exports": {
-    "RemoteChangeHub": { "type": "durable-object", "storage": "sqlite" }
+    "RemoteChangeHub": { "type": "durable-object", "storage": "sqlite" },
+    "VaultIndex": { "type": "durable-object", "storage": "sqlite" }
   },
-  "vars": { "SYNC_GATEWAY_TOKEN": "gateway-test-token" }
+  "r2_buckets": [
+    { "binding": "MINERAL", "bucket_name": "mineral-test" }
+  ],
+  "vars": {
+    "SYNC_GATEWAY_TOKEN": "gateway-test-token",
+    "MUTATION_INGRESS_TOKEN": "ingress-test-token",
+    "INDEXING_ENABLED": "true",
+    "MINERAL_R2_ENDPOINT": "https://example.r2.cloudflarestorage.com",
+    "MINERAL_BUCKET": "mineral",
+    "MINERAL_REMOTE_PREFIX": ""
+  }
 }

@@ -1,8 +1,10 @@
 import { isTextDocumentKey } from "@mineral/core/keys";
 import type {
+  DeleteDocumentsResult,
   ListDocumentsInput,
   ListDocumentsResult,
   PutDocumentInput,
+  PutDocumentResult,
   VaultRpc,
   VaultRpcDocumentMetadata,
 } from "@mineral/core/vault-rpc";
@@ -24,9 +26,10 @@ export type VaultDocuments = {
   metadata(key: string): Promise<VaultDocumentMetadata | null>;
   head(key: string): Promise<VaultDocumentMetadata | null>;
   list(input?: ListDocumentsInput): Promise<VaultDocumentList>;
-  put(input: PutDocumentInput): Promise<void>;
-  put(key: string, bytes: Uint8Array, options?: { httpMetadata?: { contentType?: string }; customMetadata?: Record<string, string> }): Promise<void>;
-  delete(keys: string | string[]): Promise<void>;
+  put(input: PutDocumentInput): Promise<PutDocumentResult>;
+  put(key: string, bytes: Uint8Array, options?: { httpMetadata?: { contentType?: string }; customMetadata?: Record<string, string> }): Promise<PutDocumentResult>;
+  put(inputOrKey: PutDocumentInput | string, bytes?: Uint8Array, options?: { httpMetadata?: { contentType?: string }; customMetadata?: Record<string, string> }): Promise<PutDocumentResult>;
+  delete(key: string | string[]): Promise<DeleteDocumentsResult>;
   backupText(key: string, text: string, contentType?: string): Promise<string>;
   move(from: string, to: string): Promise<void>;
 };
@@ -66,9 +69,9 @@ export function createVaultClient(rpc: VaultRpc): VaultClient {
         const input = typeof inputOrKey === "string"
           ? { key: inputOrKey, bytes: bytes!, contentType: options?.httpMetadata?.contentType, customMetadata: options?.customMetadata }
           : inputOrKey;
-        await rpc.putDocument(input);
+        return rpc.putDocument(input);
       },
-      async delete(keys) { await rpc.deleteDocuments(keys); },
+      async delete(keys) { return rpc.deleteDocuments(keys); },
       async backupText(key, text, contentType) { return rpc.backupTextDocument(key, text, contentType); },
       async move(from, to) { await rpc.moveDocument(from, to); },
     },

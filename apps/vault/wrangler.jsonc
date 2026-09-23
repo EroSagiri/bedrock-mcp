@@ -10,6 +10,9 @@
   "r2_buckets": [
     { "binding": "MINERAL", "bucket_name": "mineral" }
   ],
+  "services": [
+    { "binding": "SYNC_GATEWAY", "service": "mineral-sync-gateway" }
+  ],
   "durable_objects": {
     "bindings": [
       {
@@ -23,5 +26,11 @@
       "type": "durable-object",
       "storage": "sqlite"
     }
+  },
+  "vars": {
+    "INDEXING_ENABLED": "true",
+    "MINERAL_R2_ENDPOINT": "https://example.r2.cloudflarestorage.com",
+    "MINERAL_BUCKET": "mineral",
+    "MINERAL_REMOTE_PREFIX": ""
   }
 }

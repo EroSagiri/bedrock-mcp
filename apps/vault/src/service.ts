@@ -1,5 +1,8 @@
 import type { VaultIndex } from "./durable/vault-index";
 import { textContentTypeForKey } from "@mineral/core/content";
+import { createMutationRecorder, type MutationRecorder } from "./mutation/recorder";
+import type { MutationJournal } from "./mutation/store";
+import type { MutationSource } from "./mutation/types";
 
 export type VaultDocumentMetadata = {
   key: string;
@@ -17,29 +20,63 @@ export type VaultDocument = VaultDocumentMetadata & {
   httpMetadata: { contentType?: string } | null;
   text(): Promise<string>;
 };
+
 export type PutDocumentInput = {
   key: string;
   bytes: Uint8Array;
   contentType?: string;
   customMetadata?: Record<string, string>;
 };
+
+/**
+ * What a committed write reports back.
+ *
+ * The revision is the point: a writer may report the mutation it just caused, and the journal's
+ * idempotency key rides along so a retry is free.
+ */
+export type VaultWriteResult = {
+  key: string;
+  etag: string;
+  size: number;
+  mutationId: string;
+  mutationSeq: number;
+  /** `true` when R2 committed but the journal fact could not be written. Never silent. */
+  mutationPending: boolean;
+};
+
+export type VaultDeleteResult = {
+  key: string;
+  mutationId: string;
+  mutationSeq: number;
+  mutationPending: boolean;
+};
+
 export type ListDocumentsInput = { prefix?: string; cursor?: string; limit?: number; include?: string[] };
 export type ListDocumentsResult = { items: VaultDocumentMetadata[]; objects: VaultDocumentMetadata[]; cursor: string | null; truncated: boolean };
+
+/** The source a caller claims for its writes. MCP is the default because Vault is server-authoritative. */
+export type VaultWriteOptions = { source?: MutationSource };
 
 /**
  * Transitional in-process document port. Its concrete R2 implementation is
  * confined to Vault; callers depend on this named port rather than a binding.
+ *
+ * Every mutating method is a **journal entry point**: R2 commits first, then `recordMutation()`.
+ * No caller is expected to announce the change itself.
  */
 export type VaultDocuments = {
   get(key: string): Promise<VaultDocument | null>;
   metadata(key: string): Promise<VaultDocumentMetadata | null>;
   head(key: string): Promise<VaultDocumentMetadata | null>;
   list(input?: ListDocumentsInput): Promise<ListDocumentsResult>;
-  put(input: PutDocumentInput): Promise<void>;
-  put(key: string, bytes: Uint8Array, options?: { httpMetadata?: { contentType?: string }; customMetadata?: Record<string, string> }): Promise<void>;
-  delete(keys: string | string[]): Promise<void>;
-  backupText(key: string, text: string, contentType?: string): Promise<string>;
-  move(from: string, to: string): Promise<void>;
+  /**
+   * Both the structured form (preferred) and the key/bytes form are accepted, because that is the
+   * shape the existing MCP tools already use. Either way this method owns the mutation fact.
+   */
+  put(inputOrKey: PutDocumentInput | string, bytesOrOptions?: Uint8Array | VaultWriteOptions, options?: { httpMetadata?: { contentType?: string }; customMetadata?: Record<string, string> } & VaultWriteOptions): Promise<VaultWriteResult>;
+  /** One key yields one fact; many keys yield one fact each. */  delete<Keys extends string | string[]>(keys: Keys, options?: VaultWriteOptions): Promise<Keys extends string ? VaultDeleteResult : VaultDeleteResult[]>;
+  backupText(key: string, text: string, contentType?: string, options?: VaultWriteOptions): Promise<string>;
+  move(from: string, to: string, options?: VaultWriteOptions): Promise<void>;
 };
 
 export type VaultIndexService = {
@@ -50,6 +87,8 @@ export type VaultIndexService = {
 export type VaultService = {
   documents: VaultDocuments;
   index: VaultIndexService;
+  /** Exposed so the ingress and the consumers share exactly one recorder instance. */
+  mutations: MutationRecorder;
 };
 
 function metadata(object: R2Object | R2ObjectBody): VaultDocumentMetadata {
@@ -69,9 +108,33 @@ type VaultEnv = {
   VAULT_INDEX: DurableObjectNamespace<VaultIndex>;
 };
 
-export function createVaultService(env: VaultEnv): VaultService {
+export function createVaultService(env: VaultEnv, options: { journal?: MutationJournal; now?: () => number } = {}): VaultService {
   const stub = env.VAULT_INDEX.get(env.VAULT_INDEX.idFromName("vault"));
+  const journal: MutationJournal = options.journal ?? (stub as unknown as MutationJournal);
+  const mutations = createMutationRecorder({ journal, ...(options.now ? { now: options.now } : {}) });
+
+  /**
+   * The one place a successful R2 write becomes a mutation fact.
+   *
+   * If the journal write fails, the R2 write is **not** rolled back and is **not** reported as a
+   * failure: the caller is told `mutationPending`, an id is still returned, and the error is logged.
+   * A durability problem in the journal is never allowed to rewrite the outcome of the data plane.
+   */
+  async function record(
+    input: Parameters<MutationRecorder["record"]>[0],
+  ): Promise<{ mutationId: string; mutationSeq: number; mutationPending: boolean }> {
+    try {
+      const recorded = await mutations.record(input);
+      return { mutationId: recorded.id, mutationSeq: recorded.seq, mutationPending: false };
+    } catch (error) {
+      const pendingId = input.id ?? "";
+      console.error(`mutation recording incomplete op=${input.op} source=${input.source} id=${pendingId} error=${error instanceof Error ? error.message.slice(0, 200) : "unknown"}`);
+      return { mutationId: pendingId, mutationSeq: -1, mutationPending: true };
+    }
+  }
+
   return {
+    mutations,
     documents: {
       async get(key) {
         const object = await env.MINERAL.get(key);
@@ -83,8 +146,7 @@ export function createVaultService(env: VaultEnv): VaultService {
         const object = await env.MINERAL.head(key);
         return object ? metadata(object) : null;
       },
-      async head(key) { return this.metadata(key); },
-      async list(input = {}) {
+      async head(key) { return this.metadata(key); },      async list(input = {}) {
         const page = await env.MINERAL.list({
           prefix: input.prefix,
           cursor: input.cursor,
@@ -94,27 +156,45 @@ export function createVaultService(env: VaultEnv): VaultService {
         const items = page.objects.map(metadata);
         return { items, objects: items, cursor: page.truncated ? page.cursor ?? null : null, truncated: page.truncated };
       },
-      async put(inputOrKey: PutDocumentInput | string, bytes?: Uint8Array, options?: { httpMetadata?: { contentType?: string }; customMetadata?: Record<string, string> }) {
-        const input = typeof inputOrKey === "string" ? { key: inputOrKey, bytes: bytes!, contentType: options?.httpMetadata?.contentType, customMetadata: options?.customMetadata } : inputOrKey;
-        await env.MINERAL.put(input.key, input.bytes, {
+      async put(inputOrKey: PutDocumentInput | string, bytesOrOptions?: Uint8Array | VaultWriteOptions, options?: { httpMetadata?: { contentType?: string }; customMetadata?: Record<string, string> } & VaultWriteOptions) {
+        const bytes = bytesOrOptions instanceof Uint8Array ? bytesOrOptions : undefined;
+        const write = (bytesOrOptions instanceof Uint8Array ? options : bytesOrOptions) as ({ httpMetadata?: { contentType?: string }; customMetadata?: Record<string, string> } & VaultWriteOptions) | undefined;
+        const input: PutDocumentInput = typeof inputOrKey === "string"
+          ? { key: inputOrKey, bytes: bytes!, contentType: write?.httpMetadata?.contentType, customMetadata: write?.customMetadata }
+          : inputOrKey;
+        const source: MutationSource = (typeof inputOrKey === "string" ? write?.source : undefined) ?? "mcp";
+        const object = await env.MINERAL.put(input.key, input.bytes, {
           httpMetadata: input.contentType ? { contentType: input.contentType } : undefined,
           customMetadata: input.customMetadata,
         });
+        const recorded = await record({ source, op: "put", path: input.key, etag: object.etag, size: object.size });
+        return { key: input.key, etag: object.etag, size: object.size, ...recorded };
       },
-      async delete(keys) { await env.MINERAL.delete(keys); },
-      async backupText(key, text, contentType) {
+      async delete<Keys extends string | string[]>(keys: Keys, options?: VaultWriteOptions) {
+        const list = (typeof keys === "string" ? [keys] : keys) as string[];
+        const source: MutationSource = options?.source ?? "mcp";
+        await env.MINERAL.delete(list);
+        const results = await Promise.all(list.map(async key => ({ key, ...(await record({ source, op: "delete", path: key })) })));
+        return (typeof keys === "string" ? results[0] : results) as Keys extends string ? VaultDeleteResult : VaultDeleteResult[];
+      },
+      async backupText(key, text, contentType, options) {
         const backupKey = `.history/${new Date().toISOString().replace(/[:.]/g, "-")}/${key}`;
-        await env.MINERAL.put(backupKey, new TextEncoder().encode(text), {
+        const bytes = new TextEncoder().encode(text);
+        const object = await env.MINERAL.put(backupKey, bytes, {
           httpMetadata: { contentType: textContentTypeForKey(key, contentType) },
           customMetadata: { sourceKey: key, createdAt: new Date().toISOString() },
         });
+        await record({ source: options?.source ?? "system", op: "put", path: backupKey, etag: object.etag, size: object.size });
         return backupKey;
       },
-      async move(from, to) {
+      async move(from, to, options) {
         const source = await env.MINERAL.get(from);
         if (!source) throw new Error(`Not found: ${from}`);
-        await env.MINERAL.put(to, source.body, { httpMetadata: source.httpMetadata, customMetadata: source.customMetadata });
+        const bytes = new Uint8Array(await source.arrayBuffer());
+        const object = await env.MINERAL.put(to, bytes, { httpMetadata: source.httpMetadata, customMetadata: source.customMetadata });
+        await record({ source: options?.source ?? "mcp", op: "put", path: to, etag: object.etag, size: object.size });
         await env.MINERAL.delete(from);
+        await record({ source: options?.source ?? "mcp", op: "delete", path: from });
       },
     },
     index: {
