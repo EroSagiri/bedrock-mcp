@@ -4,12 +4,12 @@ import {
   type ReadResourceCallback,
   type ReadResourceTemplateCallback,
   type CallToolResult,
+  type ToolAnnotations,
   type RegisteredResource,
   type RegisteredResourceTemplate,
   type RegisteredTool,
   type ResourceMetadata,
 } from "@modelcontextprotocol/server";
-import type { ToolAnnotations } from "@modelcontextprotocol/server";
 import { z } from "zod";
 
 type ToolRisk = "read" | "write" | "destructive";
@@ -132,13 +132,13 @@ const TOOL_METADATA: Record<string, {
     category: "search",
     risk: "read",
     title: "Search text",
-    description: "Search filenames, paths, or original Markdown content. Chinese is matched as a substring of the note text, so a word inside a sentence is found; Latin terms go through the full-text index and are ranked by relevance.",
+    description: "Search the note index by content, filename or path. Chinese is matched as a substring of the note text, so a word inside a sentence is found; Latin terms go through the full-text index and are ranked by relevance. Never reads a document.",
   },
   search_frontmatter: {
     category: "search",
     risk: "read",
     title: "Search frontmatter",
-    description: "Find notes by frontmatter field and value.",
+    description: "Find notes by frontmatter field and value, from the index.",
   },
   link_rename_with_links: {
     category: "links",
@@ -150,19 +150,19 @@ const TOOL_METADATA: Record<string, {
     category: "links",
     risk: "read",
     title: "Find backlinks",
-    description: "Find notes linking to the requested note.",
+    description: "Find the notes that link to this one, from the index.",
   },
   link_get_outgoing: {
     category: "links",
     risk: "read",
     title: "Get outgoing links",
-    description: "List wikilinks from a note and identify unresolved links.",
+    description: "List the wikilinks a note makes, from the index, and identify the unresolved ones.",
   },
   graph_get: {
     category: "graph",
     risk: "read",
     title: "Get link graph",
-    description: "Build a wikilink graph with nodes, edges, and dangling-link status.",
+    description: "Build the wikilink graph from the index: nodes, edges, and dangling-link status.",
   },
   graph_neighbors: {
     category: "graph",
@@ -180,13 +180,13 @@ const TOOL_METADATA: Record<string, {
     category: "vault",
     risk: "read",
     title: "List vault documents",
-    description: "List objects in the vault with metadata and pagination.",
+    description: "List objects in the vault with metadata and pagination: a storage listing, including files the note index does not cover.",
   },
   vault_list_folders: {
     category: "vault",
     risk: "read",
     title: "List vault folders",
-    description: "List top-level vault folders and their latest activity.",
+    description: "List top-level folders and their latest activity, from the index.",
   },
   vault_recent: {
     category: "vault",
@@ -196,23 +196,23 @@ const TOOL_METADATA: Record<string, {
   },
   tag_list: {
     category: "search", risk: "read", title: "List tags",
-    description: "List normalized frontmatter/body tags from the metadata index. `contains` finds a tag by a fragment of its name; live mode is refused on a vault too large to walk.",
+    description: "List the tags the index holds. `contains` finds a tag by a fragment of its name, for when the full name is not remembered.",
   },
   tag_list_documents: {
     category: "search", risk: "read", title: "List tag documents",
-    description: "List the documents that carry a tag, and say whether an empty result means the tag does not exist or simply has no notes in the requested scope.",
+    description: "List the documents that carry a tag. An empty result says whether the tag does not exist or simply has no notes in the requested scope.",
   },
   vault_stats: {
     category: "vault",
     risk: "read",
     title: "Get vault stats",
-    description: "Summarize file counts, sizes, folders, and activity.",
+    description: "Summarize counts, sizes, folders, and activity from the index.",
   },
   vault_index_refresh: {
     category: "vault",
     risk: "write",
-    title: "Refresh vault metadata index",
-    description: "Start or resume a rebuild of the eventual-consistency Vault Metadata Index.",
+    title: "Run a revision audit",
+    description: "Start or resume a revision audit: it walks R2, diffs it against the index, and queues what the index owes. This is how the index catches up, not a search.",
   },
   vault_embedding_probe: {
     category: "vault",
@@ -290,6 +290,36 @@ type ToolCompatCallback<Args extends ToolShape> = (
   args: z.output<z.ZodObject<Args>>
 ) => CallToolResult | Promise<CallToolResult>;
 
+/**
+ * The one thing a removed parameter still has to do.
+ *
+ * `readMode` is gone from every tool definition. A client that cached an older definition may still send
+ * it, and the two values mean different things now:
+ *
+ * - `"index"` named the only behaviour that was ever correct, so it is accepted and ignored;
+ * - `"live"` named a full R2 scan of the vault, which no longer exists as an answer. Silently answering
+ *   it from the index would be a *different answer to the question that was asked*, so it is refused by
+ *   name — and it must never be allowed to start a scan.
+ *
+ * The parameter is not in any tool's schema, so a client reading the definitions cannot discover it. It
+ * survives validation only because the registration schema passes unknown keys through, which is exactly
+ * what makes refusing it by name possible.
+ */
+const REMOVED_READ_MODE = {
+  error: "live_mode_removed",
+  detail: "检索不再有模式选择：索引是唯一的检索路径，R2 只用于读取具体文件的内容。",
+  remedies: [
+    "直接调用同一个工具，不要传 readMode：它现在固定走索引",
+    "要读某篇笔记的原文用 doc_read；要按语义检索用 search_semantic",
+    "索引落后于 R2 时用 vault_index_refresh 触发审计与回填，而不是让检索去扫描 R2",
+  ],
+};
+
+function legacyReadModeRejection(args: Record<string, unknown>): CallToolResult | null {
+  if (args.readMode !== "live") return null;
+  return { content: [{ type: "text", text: JSON.stringify(REMOVED_READ_MODE, null, 2) }], isError: true };
+}
+
 export function registerToolCompat<Args extends ToolShape>(
   server: McpServer,
   name: string,
@@ -311,9 +341,11 @@ export function registerToolCompat<Args extends ToolShape>(
   const config = resolveToolConfig(name, inputSchemaOrConfig);
   return server.registerTool(name, {
     ...config,
-    inputSchema: z.object(config.inputSchema),
+    // `passthrough()` keeps a parameter that is no longer declared: it is refused by name rather than
+    // silently stripped, and it is still absent from the schema the tool publishes.
+    inputSchema: z.object(config.inputSchema).passthrough(),
     outputSchema: config.outputSchema ? z.object(config.outputSchema) : undefined,
-  }, cb);
+  }, args => legacyReadModeRejection(args as Record<string, unknown>) ?? cb(args as never));
 }
 
 export function registerResourceCompat(

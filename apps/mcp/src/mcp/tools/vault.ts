@@ -1,13 +1,8 @@
-import { applyPatch, createPatch } from "diff";
 import { z } from "zod";
 import { registerToolCompat } from "../compat";
-import { TEXT_EXTS, encodeUtf8, guessContentType, isTextFile, textContentTypeForKey } from "@mineral/core/content";
-import { backlinkTargets, scanTextFiles } from "../../vault-client";
-import { extractTags, extractWikilinks, parseFrontmatter } from "../../utils/markdown";
-import { buildMatcher, snippet, snippetAt } from "../../utils/search";
 import { relativeTime } from "../../utils/time";
-import { indexQuery, readModeSchemaDescription, refreshIndex } from "../index-client";
-import { assertTextKey, backupTextObject, err, keyError, moveObject, ok, stripTextExt, trashKey, wikilinkReplacement, type McpRegistrationContext } from "../shared";
+import { readIndex, refreshIndex } from "../index-client";
+import { err, ok, type McpRegistrationContext } from "../shared";
 
 export function registerVaultTools(ctx: McpRegistrationContext): void {
     /**
@@ -78,36 +73,11 @@ export function registerVaultTools(ctx: McpRegistrationContext): void {
     // 列出顶层目录及其文件数（vault 全景）
     registerToolCompat(ctx.server,
       "vault_list_folders",
-      { readMode: z.enum(["index", "live"]).optional().describe(readModeSchemaDescription) },
-      async ({ readMode }) => {
-        if ((readMode ?? "index") === "index") return ok(JSON.stringify(await indexQuery(ctx.env, "folders", {}), null, 2));
-        const folders = new Map<string, { count: number; lastModified: Date }>();
-        let cursor: string | undefined;
-        do {
-          const r = await ctx.env.vault.documents.list({ cursor, limit: 1000 });
-          for (const o of r.objects) {
-            const top = o.key.includes("/") ? o.key.split("/")[0] : "(root)";
-            const cur = folders.get(top);
-            if (!cur || cur.lastModified < o.uploaded) {
-              folders.set(top, {
-                count: (cur?.count ?? 0) + 1,
-                lastModified: cur && cur.lastModified > o.uploaded ? cur.lastModified : o.uploaded,
-              });
-            } else {
-              cur.count += 1;
-            }
-          }
-          cursor = r.cursor ?? undefined;
-        } while (cursor);
-        const items = [...folders.entries()]
-          .map(([name, v]) => ({
-            folder: name,
-            count: v.count,
-            lastModified: v.lastModified.toISOString(),
-            lastModifiedRelative: relativeTime(v.lastModified),
-          }))
-          .sort((a, b) => b.lastModified.localeCompare(a.lastModified));
-        return ok(JSON.stringify({ items, source: "live", freshness: "live" }, null, 2));
+      { inputSchema: {} },
+      async () => {
+        const outcome = await readIndex(ctx.env, "folders", {});
+        if (!outcome.ok) return outcome.result;
+        return ok(JSON.stringify(outcome.data, null, 2));
       }
     );
 
@@ -116,98 +86,26 @@ export function registerVaultTools(ctx: McpRegistrationContext): void {
     registerToolCompat(ctx.server,
       "vault_recent",
       {
-        limit: z.number().int().min(1).max(100).optional(),
-        prefix: z.string().optional(),
-        readMode: z.enum(["index", "live"]).optional().describe(readModeSchemaDescription),
+        inputSchema: {
+          limit: z.number().int().min(1).max(100).optional(),
+          prefix: z.string().optional(),
+        },
       },
-      async ({ limit, prefix, readMode }) => {
-        if ((readMode ?? "index") === "index") return ok(JSON.stringify(await indexQuery(ctx.env, "recent", { limit, prefix }), null, 2));
-        const all: Awaited<ReturnType<typeof ctx.env.vault.documents.list>>["items"] = [];
-        let cursor: string | undefined;
-        do {
-          const r = await ctx.env.vault.documents.list({ prefix, cursor, limit: 1000 });
-          all.push(...r.objects);
-          cursor = r.cursor ?? undefined;
-        } while (cursor);
-        const items = all
-          .filter(o => isTextFile(o.key))
-          .sort((a, b) => b.uploaded.getTime() - a.uploaded.getTime())
-          .slice(0, limit ?? 20)
-          .map(o => ({
-            key: o.key,
-            modified: o.uploaded.toISOString(),
-            modifiedRelative: relativeTime(o.uploaded),
-            size: o.size,
-          }));
-        return ok(JSON.stringify({ items, source: "live", freshness: "live" }, null, 2));
+      async ({ limit, prefix }) => {
+        const outcome = await readIndex(ctx.env, "recent", { limit, prefix });
+        if (!outcome.ok) return outcome.result;
+        return ok(JSON.stringify(outcome.data, null, 2));
       }
     );
+
     // vault 总览统计
     registerToolCompat(ctx.server,
       "vault_stats",
-      { readMode: z.enum(["index", "live"]).optional().describe(readModeSchemaDescription) },
-      async ({ readMode }) => {
-        if ((readMode ?? "index") === "index") return ok(JSON.stringify(await indexQuery(ctx.env, "stats", {}), null, 2));
-        const folderStats = new Map<string, { count: number; size: number; lastModified: Date }>();
-        let totalCount = 0;
-        let totalSize = 0;
-        let textCount = 0;
-        let textSize = 0;
-        let largest: { key: string; size: number } | null = null;
-        let smallest: { key: string; size: number } | null = null;
-        let earliest: Date | null = null;
-        let latest: Date | null = null;
-
-        let cursor: string | undefined;
-        do {
-          const r = await ctx.env.vault.documents.list({ cursor, limit: 1000 });
-          for (const o of r.objects) {
-            totalCount++;
-            totalSize += o.size;
-            if (isTextFile(o.key)) {
-              textCount++;
-              textSize += o.size;
-            }
-            if (!largest || o.size > largest.size) largest = { key: o.key, size: o.size };
-            if (!smallest || o.size < smallest.size) smallest = { key: o.key, size: o.size };
-            if (!earliest || o.uploaded < earliest) earliest = o.uploaded;
-            if (!latest || o.uploaded > latest) latest = o.uploaded;
-
-            const top = o.key.includes("/") ? o.key.split("/")[0] : "(root)";
-            const cur = folderStats.get(top);
-            if (cur) {
-              cur.count++;
-              cur.size += o.size;
-              if (o.uploaded > cur.lastModified) cur.lastModified = o.uploaded;
-            } else {
-              folderStats.set(top, { count: 1, size: o.size, lastModified: o.uploaded });
-            }
-          }
-          cursor = r.cursor ?? undefined;
-        } while (cursor);
-
-        const folders = [...folderStats.entries()]
-          .map(([name, v]) => ({
-            folder: name,
-            count: v.count,
-            size: v.size,
-            lastModified: v.lastModified.toISOString(),
-            lastModifiedRelative: relativeTime(v.lastModified),
-          }))
-          .sort((a, b) => b.count - a.count);
-
-        return ok(JSON.stringify({
-          total: { count: totalCount, sizeBytes: totalSize },
-          textFiles: { count: textCount, sizeBytes: textSize },
-          binaryFiles: { count: totalCount - textCount, sizeBytes: totalSize - textSize },
-          largest,
-          smallest,
-          earliest: earliest?.toISOString() ?? null,
-          latest: latest?.toISOString() ?? null,
-          latestRelative: latest ? relativeTime(latest) : null,
-          folders,
-          source: "live", freshness: "live",
-        }, null, 2));
+      { inputSchema: {} },
+      async () => {
+        const outcome = await readIndex(ctx.env, "stats", {});
+        if (!outcome.ok) return outcome.result;
+        return ok(JSON.stringify(outcome.data, null, 2));
       }
     );
 }

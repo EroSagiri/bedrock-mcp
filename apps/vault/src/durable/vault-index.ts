@@ -362,19 +362,31 @@ export class VaultIndex extends DurableObject<Env> {
    * `generation` is gone with the snapshot model: the interesting number is now how many documents are
    * not yet published at the current index version, because that is exactly what makes a search answer
    * incomplete.
+   *
+   * `indexReady` answers a different question — has this index ever published anything at all — and it is
+   * what lets a query tool refuse to answer instead of reporting an empty vault. A search must never fall
+   * back to walking R2, so "I cannot answer yet" has to be sayable.
    */
   private freshness() {
     const row = rows(this.db.exec("SELECT COUNT(*) count FROM documents"))[0] as { count: number } | undefined;
     const stale = this.staleCount();
+    const documents = Number(row?.count ?? 0);
+    const indexedAt = this.getMeta("indexed_at");
+    const lastAuditAt = this.getMeta("last_audit_at");
     return {
-      documents: Number(row?.count ?? 0),
+      documents,
       staleDocuments: stale,
       partial: stale > 0,
       indexVersion: CURRENT_INDEX_VERSION,
-      indexedAt: this.getMeta("indexed_at"),
+      indexedAt,
       /** The freshest revision this note index has actually observed; compared with R2 for staleness. */
       indexedEtag: this.getMeta("indexed_etag"),
-      lastAuditAt: this.getMeta("last_audit_at"),
+      lastAuditAt,
+      /**
+       * False only before the first publish or the first completed audit. An empty *audited* vault is
+       * ready — it is empty, which is a real answer — while an index that has never run is not.
+       */
+      indexReady: documents > 0 || indexedAt !== null || lastAuditAt !== null,
       freshness: "eventual" as const,
     };
   }
@@ -805,7 +817,24 @@ export class VaultIndex extends DurableObject<Env> {
     }
     if (kind === "recent") return { ...meta, source: "index", items: rows(this.db.exec("SELECT key, modified, size FROM documents WHERE key LIKE ? ORDER BY modified DESC LIMIT ?", `${prefix}%`, limit)) };
     if (kind === "folders") return { ...meta, source: "index", items: rows(this.db.exec("SELECT CASE WHEN instr(key,'/')=0 THEN '(root)' ELSE substr(key,1,instr(key,'/')-1) END folder, COUNT(*) count, MAX(modified) lastModified FROM documents GROUP BY folder ORDER BY lastModified DESC")) };
-    if (kind === "stats") return { ...meta, source: "index", total: rows(this.db.exec("SELECT COUNT(*) count, COALESCE(SUM(size),0) sizeBytes FROM documents"))[0] ?? { count: 0, sizeBytes: 0 } };
+    if (kind === "stats") {
+      // Everything here is derived from the index's own rows, so a statistic and a search can never
+      // disagree about which documents exist. `binaryFiles` is deliberately absent: the note index holds
+      // text documents, and reporting a number it cannot know would be worse than not reporting one.
+      const totals = rows(this.db.exec(
+        "SELECT COUNT(*) count, COALESCE(SUM(size), 0) sizeBytes, MIN(modified) earliest, MAX(modified) latest FROM documents",
+      ))[0] ?? { count: 0, sizeBytes: 0, earliest: null, latest: null };
+      return {
+        ...meta,
+        source: "index",
+        total: totals,
+        largest: rows(this.db.exec("SELECT key, size FROM documents ORDER BY size DESC, key LIMIT 1"))[0] ?? null,
+        smallest: rows(this.db.exec("SELECT key, size FROM documents ORDER BY size ASC, key LIMIT 1"))[0] ?? null,
+        folders: rows(this.db.exec(
+          "SELECT CASE WHEN instr(key, '/') = 0 THEN '(root)' ELSE substr(key, 1, instr(key, '/') - 1) END folder, COUNT(*) count, COALESCE(SUM(size), 0) size, MAX(modified) lastModified FROM documents GROUP BY folder ORDER BY count DESC, folder",
+        )),
+      };
+    }
     if (kind === "graph") {
       const graph = this.graph(prefix, limit);
       if (input.operation === "orphans") {

@@ -211,6 +211,17 @@ export function backlinkTargets(key: string): Set<string> {
   return new Set([noExt, basename]);
 }
 
+/**
+ * Reads every text document in the vault.
+ *
+ * It survives for exactly one caller: `link_rename_with_links`, which has to *rewrite* the notes that link
+ * to the renamed file, so it must see their text before it can change it. On a large vault that is one RPC
+ * per note, and the same ceiling that killed the live search modes can kill it — a rename over this vault
+ * fits, a much larger one would not.
+ *
+ * It is not a retrieval path. Nothing that answers a *question* may use it: the note index answers
+ * questions, and this reads files.
+ */
 export async function scanTextFiles<T>(
   documents: VaultDocuments,
   prefix: string | undefined,

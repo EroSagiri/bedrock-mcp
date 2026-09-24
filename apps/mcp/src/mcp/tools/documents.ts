@@ -2,9 +2,7 @@ import { applyPatch, createPatch } from "diff";
 import { z } from "zod";
 import { registerToolCompat } from "../compat";
 import { TEXT_EXTS, encodeUtf8, guessContentType, isTextFile, textContentTypeForKey } from "@mineral/core/content";
-import { backlinkTargets, scanTextFiles } from "../../vault-client";
 import { extractTags, extractWikilinks, parseFrontmatter } from "../../utils/markdown";
-import { buildMatcher, snippet, snippetAt } from "../../utils/search";
 import { relativeTime } from "../../utils/time";
 import { assertTextKey, backupTextObject, err, keyError, moveObject, ok, stripTextExt, trashKey, wikilinkReplacement, type McpRegistrationContext } from "../shared";
 

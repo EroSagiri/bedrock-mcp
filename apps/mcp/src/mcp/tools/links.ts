@@ -1,12 +1,11 @@
 import { applyPatch, createPatch } from "diff";
 import { z } from "zod";
 import { registerToolCompat } from "../compat";
+import { readIndex } from "../index-client";
 import { TEXT_EXTS, encodeUtf8, guessContentType, isTextFile, textContentTypeForKey } from "@mineral/core/content";
 import { backlinkTargets, scanTextFiles } from "../../vault-client";
 import { extractTags, extractWikilinks, parseFrontmatter } from "../../utils/markdown";
-import { buildMatcher, snippet, snippetAt } from "../../utils/search";
 import { relativeTime } from "../../utils/time";
-import { indexQuery, readModeSchemaDescription } from "../index-client";
 import { assertTextKey, backupTextObject, err, keyError, moveObject, ok, stripTextExt, trashKey, wikilinkReplacement, type McpRegistrationContext } from "../shared";
 
 export function registerLinkTools(ctx: McpRegistrationContext): void {
@@ -112,28 +111,15 @@ export function registerLinkTools(ctx: McpRegistrationContext): void {
     registerToolCompat(ctx.server,
       "link_find_backlinks",
       {
-        key: z.string().min(1).describe("被链接的笔记，例如 '概念/二阶思考.md'"),
-        limit: z.number().int().min(1).max(200).optional(),
-        readMode: z.enum(["index", "live"]).optional().describe(readModeSchemaDescription),
+        inputSchema: {
+          key: z.string().min(1).describe("被链接的笔记，例如 '概念/二阶思考.md'"),
+          limit: z.number().int().min(1).max(200).optional(),
+        },
       },
-      async ({ key, limit, readMode }) => {
-        if ((readMode ?? "index") === "index") return ok(JSON.stringify(await indexQuery(ctx.env, "backlinks", { key, limit }), null, 2));
-        const targets = backlinkTargets(key);
-        const matches = await scanTextFiles(ctx.env.vault.documents, undefined, (k, text, o) => {
-          if (k === key) return null; // 不返回自身
-          const links = extractWikilinks(text);
-          const hit = links.find(l => targets.has(l) || targets.has(l.split("/").pop() ?? ""));
-          if (!hit) return null;
-          return {
-            key: k,
-            modified: o.uploaded.toISOString(),
-            modifiedRelative: relativeTime(o.uploaded),
-            via: hit,
-            snippet: snippet(text, `[[${hit}`),
-          };
-        }, { max: limit ?? 100 });
-        matches.sort((a, b) => b.modified.localeCompare(a.modified));
-        return ok(JSON.stringify({ target: key, count: matches.length, matches, source: "live", freshness: "live" }, null, 2));
+      async ({ key, limit }) => {
+        const outcome = await readIndex(ctx.env, "backlinks", { key, limit });
+        if (!outcome.ok) return outcome.result;
+        return ok(JSON.stringify(outcome.data, null, 2));
       }
     );
 
@@ -141,33 +127,11 @@ export function registerLinkTools(ctx: McpRegistrationContext): void {
     // 这篇笔记里链出去的 [[wikilinks]]
     registerToolCompat(ctx.server,
       "link_get_outgoing",
-      { key: z.string().min(1), readMode: z.enum(["index", "live"]).optional().describe(readModeSchemaDescription) },
-      async ({ key, readMode }) => {
-        if ((readMode ?? "index") === "index") return ok(JSON.stringify(await indexQuery(ctx.env, "outgoing", { key }), null, 2));
-        const obj = await ctx.env.vault.documents.get(key);
-        if (!obj) return err(`Not found: ${key}`);
-        const text = await obj.text();
-        const links = extractWikilinks(text);
-        // 顺手探一下哪些是死链（vault 里搜不到对应文件）
-        const checks = await Promise.all(links.map(async l => {
-          // 尝试常见路径形式
-          const candidates = [
-            `${l}.md`,
-            l, // 已经带扩展名的情况
-          ];
-          for (const c of candidates) {
-            const h = await ctx.env.vault.documents.head(c);
-            if (h) return { link: l, resolved: c };
-          }
-          return { link: l, resolved: null };
-        }));
-        return ok(JSON.stringify({
-          key,
-          total: links.length,
-          links: checks,
-          deadLinks: checks.filter(c => !c.resolved).map(c => c.link),
-          source: "live", freshness: "live",
-        }, null, 2));
+      { inputSchema: { key: z.string().min(1) } },
+      async ({ key }) => {
+        const outcome = await readIndex(ctx.env, "outgoing", { key });
+        if (!outcome.ok) return outcome.result;
+        return ok(JSON.stringify(outcome.data, null, 2));
       }
     );
 }

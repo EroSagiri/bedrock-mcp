@@ -1,10 +1,8 @@
 import { ResourceTemplate } from "@modelcontextprotocol/server";
 import { isTextFile } from "@mineral/core/content";
-import { scanTextFiles } from "../vault-client";
-import { extractTags } from "../utils/markdown";
+import { readIndex } from "./index-client";
 import { relativeTime } from "../utils/time";
 import { registerResourceCompat } from "./compat";
-import { buildGraph } from "./graph-data";
 import { type McpRegistrationContext } from "./shared";
 import type { VaultDocuments, VaultDocumentMetadata } from "../vault-client";
 
@@ -22,10 +20,6 @@ function jsonResource(uri: URL, value: unknown) {
       text: JSON.stringify(value, null, 2),
     }],
   };
-}
-
-function normalizeTag(tag: string): string {
-  return tag.startsWith("#") ? tag : `#${tag}`;
 }
 
 function decodeVar(value: unknown): string {
@@ -70,24 +64,19 @@ async function completeDates(bucket: VaultDocuments, value: string): Promise<str
   return [...dates].sort((a, b) => b.localeCompare(a)).slice(0, COMPLETION_LIMIT);
 }
 
-async function collectTags(bucket: VaultDocuments): Promise<Array<{ tag: string; count: number }>> {
-  const counter = new Map<string, number>();
-  await scanTextFiles(bucket, undefined, (key, text) => {
-    if (isSystemKey(key)) return null;
-    for (const tag of extractTags(text)) counter.set(tag, (counter.get(tag) ?? 0) + 1);
-    return null;
-  });
-  return [...counter.entries()]
-    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-    .map(([tag, count]) => ({ tag, count }));
-}
-
-async function completeTags(bucket: VaultDocuments, value: string): Promise<string[]> {
-  const needle = normalizeTag(value).toLowerCase();
-  return (await collectTags(bucket))
-    .map(item => item.tag)
-    .filter(tag => tag.toLowerCase().includes(needle))
-    .slice(0, COMPLETION_LIMIT);
+/**
+ * Tag completion, from the index.
+ *
+ * A completion list is asked for on nearly every keystroke in a picker, and reading every document to
+ * build it would be one RPC per note — the same cost as the live scan this product no longer has, and the
+ * same hard failure on a vault past the subrequest ceiling. The tags are already in `document_tags`, and
+ * the index matches a fragment of a name, which is what a partially typed tag is.
+ */
+async function completeTags(ctx: McpRegistrationContext, value: string): Promise<string[]> {
+  const fragment = value.replace(/^#+/, "").trim();
+  const outcome = await readIndex<{ tags?: Array<{ tag: string }> }>(ctx.env, "tags", { contains: fragment || undefined, limit: COMPLETION_LIMIT });
+  if (!outcome.ok) return [];
+  return (outcome.data.tags ?? []).map(item => item.tag).slice(0, COMPLETION_LIMIT);
 }
 
 async function collectFolderPrefixes(bucket: VaultDocuments): Promise<Array<{ folder: string; count: number; lastModified: Date }>> {
@@ -275,6 +264,10 @@ export function registerMineralResources(ctx: McpRegistrationContext): void {
     "res_graph",
     "mineral://graph",
     { description: "vault wikilink 图谱：nodes、edges、dangling links。", mimeType: "application/json" },
-    async uri => jsonResource(uri, await buildGraph(ctx.env.vault.documents, { includeDangling: true, limit: 1000 }))
+    async uri => {
+      const outcome = await readIndex(ctx.env, "graph", { includeDangling: true, limit: 1000 });
+      // A resource cannot answer with an error result, so an index that cannot answer says so in its body.
+      return jsonResource(uri, outcome.ok ? outcome.data : { error: "index_unavailable", detail: "索引无法回答，用 vault_index_refresh 触发审计与回填。" });
+    }
   );
 }
