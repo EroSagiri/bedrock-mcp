@@ -836,17 +836,39 @@ export class VaultIndex extends DurableObject<Env> {
       };
     }
     if (kind === "graph") {
-      const graph = this.graph(prefix, limit);
+      // The degrees are computed over the whole graph and the page is taken afterwards, because "how many
+      // notes link here" is not a property of a page. A limit that truncated the degrees would report
+      // every node past it as isolated.
+      const graph = this.graph(prefix);
       if (input.operation === "orphans") {
         const mode = String(input.mode ?? "isolated");
-        return { ...meta, source: "index", mode, items: graph.nodes.filter(node => mode === "noIncoming" ? node.inDegree === 0 : mode === "noOutgoing" ? node.outDegree === 0 : node.inDegree === 0 && node.outDegree === 0) };
+        const orphans = graph.nodes.filter(node => mode === "noIncoming" ? node.inDegree === 0 : mode === "noOutgoing" ? node.outDegree === 0 : node.inDegree === 0 && node.outDegree === 0);
+        return { ...meta, source: "index", mode, orphanCount: orphans.length, nodeCount: graph.totalNodes, nodes: orphans.slice(0, limit) };
       }
       if (input.operation === "neighbors") {
-        const selected = new Set<string>([String(input.key)]); const depth = Math.max(1, Math.min(Number(input.depth ?? 1), 3));
-        for (let i = 0; i < depth; i++) for (const edge of graph.edges) if (selected.has(edge.from) && edge.to) selected.add(edge.to); else if (edge.to && selected.has(edge.to)) selected.add(edge.from);
-        return { ...meta, source: "index", key: input.key, depth, nodes: graph.nodes.filter(node => selected.has(node.key)), edges: graph.edges.filter(edge => selected.has(edge.from) && (!edge.to || selected.has(edge.to))) };
+        const selected = new Set<string>([String(input.key)]);
+        const depth = Math.max(1, Math.min(Number(input.depth ?? 1), 3));
+        for (let step = 0; step < depth; step++) {
+          for (const edge of graph.edges) {
+            if (selected.has(edge.from) && edge.to) selected.add(edge.to);
+            else if (edge.to && selected.has(edge.to)) selected.add(edge.from);
+          }
+        }
+        const nodes = graph.nodes.filter(node => selected.has(node.key));
+        return {
+          ...meta,
+          source: "index",
+          key: input.key,
+          depth,
+          nodeCount: nodes.length,
+          totalNodes: graph.totalNodes,
+          nodes: nodes.slice(0, limit),
+          edges: graph.edges.filter(edge => selected.has(edge.from) && (!edge.to || selected.has(edge.to))),
+        };
       }
-      return { ...meta, source: "index", ...graph };
+      const nodes = graph.nodes.slice(0, limit);
+      const selected = new Set(nodes.map(node => node.key));
+      return { ...meta, source: "index", ...graph, nodeCount: nodes.length, nodes, edges: graph.edges.filter(edge => selected.has(edge.from) && (!edge.to || selected.has(edge.to))) };
     }
     if (kind === "filename-search") return { ...meta, source: "index", hits: rows(this.db.exec("SELECT key, modified, size FROM documents WHERE key LIKE ? ESCAPE '\\' AND key LIKE ? ESCAPE '\\' ORDER BY modified DESC LIMIT ?", `${escapeLike(prefix)}%`, likeContains(String(input.query)), limit)) };
     if (kind === "search") return this.search(input);
@@ -943,13 +965,46 @@ export class VaultIndex extends DurableObject<Env> {
     return Number(row?.count ?? 0);
   }
 
-  private graph(prefix: string, limit: number) {
-    const docs = rows(this.db.exec("SELECT key, modified, size FROM documents WHERE key LIKE ? ORDER BY key LIMIT ?", `${prefix}%`, limit)) as Array<{ key: string; modified: string; size: number }>;
-    const aliases = new Map<string, string>(); for (const doc of docs) { const plain = doc.key.replace(/\.(md|markdown|mdx|txt)$/i, ""); aliases.set(doc.key, doc.key); aliases.set(plain, doc.key); aliases.set(plain.split("/").pop() ?? plain, doc.key); }
+  /**
+   * The wikilink graph, as the `links` table holds it.
+   *
+   * It is computed whole and paged by its caller, because every number in it — in-degree, out-degree,
+   * dangling — is a property of the entire vault. Counting them from a truncated edge set is what made
+   * `graph_get` with a small `limit` throw: the edges referenced nodes the page had left out.
+   */
+  private graph(prefix: string) {
+    const all = rows(this.db.exec("SELECT key, modified, size FROM documents WHERE key LIKE ? ORDER BY key", `${prefix}%`)) as Array<{ key: string; modified: string; size: number }>;
+    const aliases = new Map<string, string>();
+    for (const doc of all) {
+      const plain = doc.key.replace(/\.(md|markdown|mdx|txt)$/i, "");
+      aliases.set(doc.key, doc.key);
+      aliases.set(plain, doc.key);
+      aliases.set(plain.split("/").pop() ?? plain, doc.key);
+    }
     const rawEdges = rows(this.db.exec("SELECT d.key `from`, l.to_key link FROM links l JOIN documents d ON d.id = l.document_id WHERE d.key LIKE ?", `${prefix}%`)) as Array<{ from: string; link: string }>;
-    const edges: Array<{ from: string; link: string; to: string | null; dangling: boolean }> = rawEdges.map(edge => ({ ...edge, to: aliases.get(edge.link) ?? aliases.get(edge.link.replace(/\.(md|markdown|mdx|txt)$/i, "")) ?? null, dangling: !aliases.has(edge.link) }));
-    const degree = new Map(docs.map(doc => [doc.key, { inDegree: 0, outDegree: 0 }])); for (const edge of edges) { degree.get(String(edge.from))!.outDegree++; if (edge.to) degree.get(String(edge.to))!.inDegree++; }
-    return { nodeCount: docs.length, edgeCount: edges.length, danglingCount: edges.filter(edge => edge.dangling).length, nodes: docs.map(doc => ({ ...doc, ...(degree.get(doc.key)!) })), edges };
+    const edges = rawEdges.map(edge => ({
+      ...edge,
+      to: aliases.get(edge.link) ?? aliases.get(edge.link.replace(/\.(md|markdown|mdx|txt)$/i, "")) ?? null,
+      dangling: !aliases.has(edge.link),
+    }));
+
+    const degree = new Map(all.map(doc => [doc.key, { inDegree: 0, outDegree: 0 }]));
+    for (const edge of edges) {
+      const from = degree.get(String(edge.from));
+      if (from) from.outDegree++;
+      // A source outside the prefix filter still counts towards an in-degree inside it: the link is real,
+      // even though the note that makes it is not part of this page.
+      const to = edge.to === null ? undefined : degree.get(edge.to);
+      if (to) to.inDegree++;
+    }
+
+    return {
+      totalNodes: all.length,
+      edgeCount: edges.length,
+      danglingCount: edges.filter(edge => edge.dangling).length,
+      nodes: all.map(doc => ({ ...doc, ...(degree.get(doc.key) ?? { inDegree: 0, outDegree: 0 }) })),
+      edges,
+    };
   }
 }
 

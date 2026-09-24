@@ -109,4 +109,30 @@ describe("link queries are indexed queries", () => {
     expect(graph).toMatchObject({ danglingCount: 1 });
     expect(graph.indexReady).toBe(true);
   });
+
+  it("counts degrees over the whole graph, not over the page it returns", async () => {
+    const stub = index();
+    await stub.resetMutationState();
+    const env = bindings();
+    await env.MINERAL.put("graph/hub.md", encoder.encode("# Hub\n\nlinks to [[graph/leaf]]\n"));
+    await env.MINERAL.put("graph/leaf.md", encoder.encode("# Leaf\n\nno outgoing links\n"));
+    await env.MINERAL.put("graph/lonely.md", encoder.encode("# Lonely\n\nnothing at all\n"));
+    for (const key of ["graph/hub.md", "graph/leaf.md", "graph/lonely.md"]) await stub.applyIndexIntent({ path: key, action: "upsert" });
+
+    // A limit smaller than the vault used to throw here: the edge set referenced nodes the page had left
+    // out, and the degree lookup dereferenced a node that was not in it.
+    const page = await query("graph", { prefix: "graph/", limit: 1 });
+    expect(page.nodeCount).toBe(1);
+    expect(page.totalNodes).toBe(3);
+    expect(page.edgeCount).toBe(1);
+    expect((page.nodes as Array<{ key: string }>)).toHaveLength(1);
+
+    const orphans = await query("graph", { operation: "orphans", mode: "isolated", prefix: "graph/", limit: 1 });
+    // `lonely` is the only isolated note, and it is found even though only one node fits in the page.
+    expect(orphans).toMatchObject({ orphanCount: 1, nodeCount: 3 });
+    expect((orphans.nodes as Array<{ key: string; inDegree: number; outDegree: number }>)[0]).toMatchObject({ key: "graph/lonely.md", inDegree: 0, outDegree: 0 });
+
+    const neighbors = await query("graph", { operation: "neighbors", key: "graph/hub.md", depth: 1, prefix: "graph/" });
+    expect((neighbors.nodes as Array<{ key: string }>).map(node => node.key)).toEqual(["graph/hub.md", "graph/leaf.md"]);
+  });
 });

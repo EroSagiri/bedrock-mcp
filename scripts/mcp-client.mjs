@@ -115,6 +115,10 @@ export async function connect({ attempts = 5, retryDelayMs = 1500 } = {}) {
   return {
     safeEndpoint,
     serverInfo: `${initialized?.serverInfo?.name ?? "?"} ${initialized?.serverInfo?.version ?? ""}`,
+    /** The tool definitions the deployment publishes, which is what a client caches. */
+    async listTools() {
+      return (await call("tools/list", {}))?.tools ?? [];
+    },
     async callTool(name, args = {}) {
       const result = await call("tools/call", { name, arguments: args });
       return { isError: result?.isError ?? false, text: (result?.content ?? []).map(part => part.text ?? "").join("\n"), raw: result };
