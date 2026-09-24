@@ -32,7 +32,7 @@ MCP 写 Vault/R2    → 没有任何人被告知（Phase 4D 之前的已知缺�
 于是：
 
 * MCP 的写入对其他 Obsidian 客户端不可见，只能靠下次 focus / 重启时全量 LIST 才发现；
-* 没有"哪些文档的索引已经过期"的持久化真相，索引只能整体重建。
+* 没有"哪些文档的索引已经过期"的持久化真相，索引只能整体重建。（这两点后来分别由 `pending_index` / `pending_vector` 物化脏集合与 live index 补上；索引本身见 [indexing.md](indexing.md)。）
 
 本层把这件事统一成**一条事实**：
 
@@ -42,8 +42,13 @@ MCP 写 Vault/R2    → 没有任何人被告知（Phase 4D 之前的已知缺�
   → recordMutation()
   → Mutation Journal（事实）
        ├── Sync Publisher → Sync Gateway
-       └── Index Scheduler → pending_index
+       ├── Index Scheduler → pending_index   （笔记索引）
+       └── Vector Scheduler → pending_vector （向量索引）
 ```
+
+`pending_index` 和 `pending_vector` **和事实写在同一个事务里**：一次已提交的写入如果忘了它欠的索引工作，就要等到夜间审计才可能被发现。它们分成两个欠账集合，是因为一个向量发布失败不该把笔记索引重新弄脏。
+
+> 两个索引本身的 schema、发布顺序、接受规则与审计，见 [indexing.md](indexing.md)。
 
 最重要的一条：
 
@@ -56,10 +61,11 @@ MCP 写 Vault/R2    → 没有任何人被告知（Phase 4D 之前的已知缺�
 
 ```text
 apps/vault/src/
-├── entrypoint.ts                 WorkerEntrypoint：RPC 适配 + POST /internal/mutations + cron drain
+├── entrypoint.ts                 WorkerEntrypoint：RPC 适配 + /internal/* + cron drain
 ├── service.ts                    VaultService：唯一的写入实现，写入后调用 recorder
 ├── document/{objects,r2}.ts      文档辅助（写入一律经过 service，因此不再各自记录）
-├── durable/vault-index.ts        VaultIndex DO：note index + Mutation Journal + pending_index
+├── durable/vault-index.ts        VaultIndex DO：note index + Mutation Journal
+│                                 + pending_index + pending_vector + 向量状态
 ├── mutation/
 │   ├── types.ts                  MutationEvent / MutationSource / JournalEntry
 │   ├── ids.ts                    mutationId 生成、path digest、结构化日志
@@ -69,11 +75,23 @@ apps/vault/src/
 │   ├── recorder.ts               recordMutation()：唯一入口
 │   └── store.ts                  MutationStore / MutationJournal 端口
 ├── index/
+│   ├── indexable.ts              两个索引共同承认的"可索引"定义
 │   ├── intents.ts                mutation → index intent 的策略与 coalesce 规则
+│   ├── text-query.ts             检索查询 → (FTS5 表达式, 中文子串) 的规划
+│   ├── live-store.ts             笔记索引 schema 与新鲜度
 │   ├── journal-store.ts          SQLite 实现（journal + pending_index，同一事务）
 │   ├── memory-store.ts           同语义的内存实现（消费者测试用）
 │   ├── scheduler.ts              Index Scheduler：claim → apply → CAS 删除
-│   └── ...                       既有 note index 查询代码
+│   ├── audit.ts / audit-runner.ts 审计状态与"列页、比较、入队"的循环
+│   └── parse.ts                  正文 → 标题/标签/链接/frontmatter 派生行
+├── vector/
+│   ├── schema.ts                 物理契约（模型/宽度/metric）与版本
+│   ├── chunk.ts                  标题感知分块 + 内容寻址的 chunk id
+│   ├── sha256.ts                 运行时 SHA-256（id 在事务外预计算）
+│   ├── embedding.ts              嵌入绑定、模型探针、批量嵌入
+│   ├── store.ts                  pending_vector / document_vector_state / vector_chunks
+│   ├── publish.ts                发布顺序、删除、GC
+│   └── scheduler.ts              Vector Scheduler：claim → apply → CAS → GC
 └── sync-publisher/
     ├── gateway-port.ts           GatewayPublisher 端口（只认 mutationId + changes）
     ├── gateway-rpc.ts            Service Binding / HTTP 两种实现
@@ -87,9 +105,10 @@ entrypoint → service → mutation/recorder → mutation/store（端口）
                     ↘ index/intents
 entrypoint → sync-publisher/publisher → mutation/store（端口）
 entrypoint → index/scheduler          → mutation/store（端口）
+entrypoint → vector/scheduler         → vector/store（端口）
 ```
 
-`mutation/*` 不认识 Gateway，也不认识索引；两个消费者各自依赖端口，不互相依赖。
+`mutation/*` 不认识 Gateway，也不认识任何一个索引；三个消费者各自依赖端口，不互相依赖。
 
 ---
 
@@ -104,7 +123,7 @@ type MutationEvent =
   | { id: string; source: MutationSource; op: "rename"; from: string; path: string; etag?: string; size?: number; committedAt: number };
 ```
 
-第一版**故意不包含**：`gateway generation`、索引状态、重试状态、冲突状态、向量状态。那些属于消费者。
+第一版**故意不包含**：`gateway generation`、索引状态、重试状态、冲突状态、向量状态。那些属于消费者 —— 索引与向量的状态住在同一个 DO 里，但属于各自的表，从不出现在这条事实里。
 
 `rename` 被类型接受并会被 journalled，但目前**没有任何写入方会产生它**：重命名在入口处就分解成
 `delete(from)` + `put(to)`，因此 Gateway 的既有协议不需要被拓宽。
@@ -146,8 +165,7 @@ Obsidian POST mutation → 服务端成功 → 响应丢失 → 客户端 retry
 
 ## 5. Mutation Journal schema
 
-持久化复用 **现有 D1 基础设施**：`VaultIndex` Durable Object 的 SQLite 实例（项目当前没有 D1
-binding，DO SQLite 就是既有的 durable 存储）。命名沿用现有 snake_case 风格。
+持久化在 `VaultIndex` Durable Object 的 SQLite 实例里。项目没有 D1 binding —— DO SQLite 就是 durable 存储，而且必须在这里，因为 Journal 事实和两个欠账集合要在同一个事务里提交。命名沿用现有 snake_case 风格。
 
 ```sql
 CREATE TABLE IF NOT EXISTS mutation_journal (
@@ -184,6 +202,8 @@ Authorization: Bearer <MUTATION_INGRESS_TOKEN>
 X-Mineral-Mutation-Origin: local-write | remote-apply
 Content-Type: application/json
 ```
+
+**这个 HTTP 路由是服务端到服务端的内部面。** 客户端不直接调用它：Obsidian 插件把上报发给 Sync Gateway 的 `POST /v1/channels/{channel}/mutations`，Gateway 认证后通过 `VAULT` service binding 中继到 Vault 的 `recordReportedMutation()` RPC，走的是**同一段**校验与记录逻辑。Gateway 是唯一面向客户端的控制面，而验真和 Journal 都留在 Vault —— 这是两件不能搬走的事。
 
 请求：
 
@@ -234,7 +254,7 @@ VaultService.documents.put → R2 PUT（拿到 etag/size）
   ↓
 recordMutation({ source: "mcp", op: "put", path, etag, size, committedAt })
   ↓
-D1: mutation_journal insert + pending_index upsert（同一事务）
+SQLite: mutation_journal insert + pending_index upsert + pending_vector upsert（同一事务）
   ↓
 返回 { etag, size, mutationId, mutationSeq, mutationPending }
   ↓
@@ -252,7 +272,7 @@ Mutation Ingress：解析 → 幂等检查 → R2 HEAD 校验
   ↓
 recordMutation({ source: "obsidian", ... })
   ↓
-D1: mutation_journal insert + pending_index upsert（同一事务）
+SQLite: mutation_journal insert + pending_index upsert + pending_vector upsert（同一事务）
   ↓
 ctx.waitUntil(drainConsumers())
 ```
@@ -304,7 +324,7 @@ delete 且不带 etag → observe(path) === null                                
 ```text
 R2 PUT（先）
   ↓
-D1: journal insert + pending_index upsert（同一事务，要么都成功要么都不成功）
+SQLite: journal insert + pending_index upsert + pending_vector upsert（同一事务，要么都成功要么都不成功）
   ↓
 commit
 ```
@@ -428,6 +448,8 @@ CREATE TABLE IF NOT EXISTS pending_index (
 );
 ```
 
+`pending_vector` 的形状与它**逐列相同**，由 `recordMutation` 的同一个事务写入。两个集合分开是因为它们的失败互不相关：Vectorize 宕机只应该让向量欠账变大，而不是把笔记索引重新弄脏。
+
 这是**物化脏集合**，不是事件历史：
 
 ```text
@@ -467,8 +489,7 @@ delete → put C          ⇒ pending_index[foo] = upsert C
 * 一次写入让 `attempts` 归零、`last_error` 清空（新的 revision 是新的工作）；
 * `INDEX_RETRY_BACKOFF_MS`（5 分钟）只作用于失败重试。
 
-未来 Index Worker 消费 delete 时负责删除 D1 note / FTS / links / Vectorize chunks；本轮只建立
-intent，并让既有的 note index 立即执行 `remove`。
+消费 `remove` 的是 `applyIndexIntent` / `applyVectorIntent`：前者重观察 R2 后删除派生行（note / FTS / headings / tags / links），后者删掉该文档在 Vectorize 里的 chunk 再忘掉账本行。
 
 ---
 

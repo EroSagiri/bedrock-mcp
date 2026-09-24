@@ -1,6 +1,6 @@
 # Phase 4A：同步网关与远端变化流
 
-状态：**架构规格，尚未实现。** 本文冻结 `mineral-sync-gateway` 的职责和协议边界；它不创建 Worker、Durable Object（DO）、WebSocket、Queue 或插件改动。
+状态：**已实现并部署。** 本文冻结 `mineral-sync-gateway` 的职责和协议边界，是后续实现的依据；实际实现见 [sync-gateway-implementation.md](sync-gateway-implementation.md)。下文第 10、12 节是当时的计划与验证记录，保留原样以便追溯，**不代表当前状态**。
 
 审计基线：`74880389d68ea9c306590fa8895997bd1f6d7858`（`7488038 refactor: serve mcp statelessly`）。
 
@@ -85,10 +85,14 @@ Hub **不是** R2 真值、对象清单、事件日志、文件体存储、previ
 | --- | --- | --- |
 | Obsidian 写入方 | `POST /v1/channels/{channel}/dirty` | Gateway credential 认证；验证小而封闭的 body 后标记为脏，返回当前 generation |
 | Obsidian 读取方 | `GET /v1/channels/{channel}` | Gateway credential 认证；返回快照 `{ generation }` |
-| Obsidian 读取方 | `GET /v1/channels/{channel}/subscribe`，Upgrade WebSocket | Gateway credential 认证并验证 Upgrade；初始先发当前 generation 快照，之后仅发 generation 推进消息 |
+| Obsidian 读取方 | `POST /v1/channels/{channel}/ticket` | 用 bearer credential 换一个 60 秒的 WebSocket ticket。订阅时可用 ticket 代替长期凭据，URL 里因此不会出现长期 secret |
+| Obsidian 读取方 | `GET /v1/channels/{channel}/subscribe`，Upgrade WebSocket | bearer credential 或 ticket 认证并验证 Upgrade；初始先发当前 generation 快照，之后仅发 generation 推进消息 |
+| Obsidian 写入方 | `POST /v1/channels/{channel}/mutations` | 客户端报告"我已自行提交到 R2"的写入；Gateway 认证后**中继到 Vault 验真**，把 verdict 原样带回（`accepted` / `duplicate` / `refused`）。Gateway 不读对象、不持 R2 凭据 |
 | Vault | `WorkerEntrypoint` RPC `markRemoteDirty(request)` | Service Binding，非公共 HTTP；同样验证契约并汇聚到 Hub |
 
-建议 Gateway 默认入口同时提供经过认证的 HTTP 路由和 `WorkerEntrypoint` RPC class。Vault 新增的未来 binding 名应为 `SYNC_GATEWAY`，service 为 `mineral-sync-gateway`。Gateway 不需要 Vault Service Binding，也不需要 R2 binding；Hub 不读取或验证 R2 内容。Vault 单向调用 Gateway 是不经公网的 Service Binding，符合 [Cloudflare Service Bindings](https://developers.cloudflare.com/workers/runtime-apis/bindings/service-bindings/) 的 Worker 间通信模型。
+建议 Gateway 默认入口同时提供经过认证的 HTTP 路由和 `WorkerEntrypoint` RPC class。Vault 侧的 binding 名为 `SYNC_GATEWAY`，service 为 `mineral-sync-gateway`，**必须写 `entrypoint: "SyncGatewayEntrypoint"`** —— 只绑默认导出会打到 fetch handler，那里没有 `markRemoteDirty`，失败形态是每次 mutation 都报 `The RPC receiver does not implement the method "markRemoteDirty"`，而事实会一直堆在 pending。这条由 `scripts/validate-worker-bindings.mjs` 静态守住。
+
+Gateway 需要**一个** Vault Service Binding（`VAULT`），且只用于 `POST /mutations` 这条中继路径：客户端上报的是"我已把某个 revision PUT 到 R2"，只有 R2 能证实它，所以验真和 Journal 都留在 Vault。除这一条外，Gateway 不需要 Vault binding，也不需要 R2 binding；Hub 不读取或验证 R2 内容。Vault 单向调用 Gateway 是不经公网的 Service Binding，符合 [Cloudflare Service Bindings](https://developers.cloudflare.com/workers/runtime-apis/bindings/service-bindings/) 的 Worker 间通信模型。
 
 第一版 Gateway 认证使用独立的最小权限 bearer secret（存为 Worker secret，固定时间比较），不能复用 R2 key。Gateway 设置以后包含 endpoint、credential、opaque channel；它们与 R2 endpoint/access-key/secret-key 分离。实施时可升级为短期签名 token/OAuth，而不改变 channel 或客户端 generation 协议。所有 HTTP 与 WS 请求在进入 DO 前先在 Worker 验证 path、method、auth、body/Upgrade，以避免未认证请求消耗 DO。
 
@@ -240,7 +244,9 @@ else:
 21. 严禁在 Hub 中存储无上限的事件历史或文件 payload。
 22. 严禁向 Gateway 暴露 Vault 的 R2 binding。
 
-## 10. 预期的未来绑定与阶段
+## 10. 预期的未来绑定与阶段（历史记录）
+
+> 本节是实施前的计划。实际落地与之有两处不同，都以本文第 4 节为准：Gateway **确实**需要一个 Vault Service Binding（只用于 `POST /mutations` 中继），并且 `/ticket` 已经实现，订阅可以用 60 秒 ticket 代替长期 bearer secret。Phase 4C/4D/4E 的状态见文末。
 
 Phase 4B 的配置（本阶段不创建）只需要指向新 `RemoteChangeHub` 的 `REMOTE_CHANGE_HUB`；它不需要 R2 或 Vault service binding。Phase 4D 才只向 Vault 增加 `SYNC_GATEWAY`，指向 `mineral-sync-gateway`。Gateway 应拥有自己的 SQLite DO export/migration；其 compatibility date、可观测性 trace/log 及生成的 binding 都必须在实施时对照已安装的 Wrangler schema 验证。Cloudflare 文档要求先在 Worker 验证和路由 WebSocket Upgrade，再代理给 DO，并建议闲置的长连接 DO WebSocket 使用 hibernation。[WebSocket 路由指引](https://developers.cloudflare.com/durable-objects/best-practices/websockets/)
 
@@ -266,8 +272,27 @@ Future    R2 Event Notifications 写入方；另行授权的 Hot realtime
 - telemetry sampling/retention and safe diagnostic fields;
 - whether first generation is a decimal string or another explicitly lossless client representation.
 
-## 12. Phase 4A 验证
+## 12. Phase 4A 验证（历史记录）
+
+> 当时的验证只修改文档。当前状态见文末。
 
 本阶段只修改文档。后端基线校验通过：`npm run typecheck`；`npm test` 在 4 个文件中通过 12 个测试。测试运行时警告：本地 Miniflare 最高支持 compatibility date `2026-03-10`，而 Worker config 要求 `2026-04-28`；这不影响 TypeScript/文档架构，但 Phase 4B 在宣称功能验证前，必须使用兼容的当前运行时完成 runtime/WS 测试。
 
-**结论：同步网关架构已准备好进入实现阶段：是。**
+---
+
+## 13. 实际落地状态
+
+| 阶段 | 状态 |
+|---|---|
+| Phase 4A 本文的语义 | ✅ 冻结 |
+| Phase 4B `apps/sync-gateway` | ✅ 已实现并部署（generation、HTTP、RPC、WebSocket、ticket 均已上线） |
+| Phase 4C 客户端接入 | ✅ 插件已接入（ticket 订阅 + 上报） |
+| Phase 4D Vault/MCP 写入方接入 | ✅ 由 Mutation Journal 承担：写入方只记事实，Sync Publisher 投递 |
+| Phase 4E Queue 投递 | ❌ 未做。当前是 Vault 内的 outbox + 2 小时 cron 重试 |
+| Future R2 Event Notifications / Hot realtime | ❌ 未做 |
+
+Phase 4D 的最终形态与本文最初设想不同：不是"Vault 直接调 Gateway"，而是**先写 Mutation Journal**，再由 Sync Publisher 以 outbox 语义投递。这样 Gateway 宕机只会留下 pending 事实，不会让一次已成功的 R2 写入看起来失败。
+
+**当时结论：同步网关架构已准备好进入实现阶段：是。**
+
+**现在：已实现、已部署、已在生产验证。**
