@@ -211,27 +211,59 @@ async function callFor(tool: string, args: Record<string, unknown>) {
 }
 
 describe("a default content search also finds a note by name", () => {
-  it("merges the filename projection into the content hits", async () => {
+  it("merges the filename projection, and keeps both signals on one hit", async () => {
     const result = await callTool({
-      results: [{ key: "notes/body.md", snippet: "mineral" }],
-      hits: [{ key: "notes/mineral-plan.md", modified: "2026-01-01T00:00:00.000Z", size: 10 }, { key: "notes/body.md", modified: "2026-01-01T00:00:00.000Z", size: 10 }],
+      results: [{ key: "notes/body.md", snippet: "mineral" }, { key: "notes/mineral-plan.md", snippet: "mineral" }],
+      hits: [{ key: "notes/mineral-plan.md", modified: "2026-01-01T00:00:00.000Z", size: 10 }, { key: "notes/old-mineral.md", modified: "2026-01-01T00:00:00.000Z", size: 10 }],
     }, { query: "mineral" });
-    const body = JSON.parse(result.text) as { results: Array<{ key: string; matched: string }>; nameMatches: number };
+    const body = JSON.parse(result.text) as { results: Array<{ key: string; matched: string[]; nameQuality?: string }>; nameMatches: number };
 
-    // The name match is present rather than silently missing, the content hit is not duplicated, and the
-    // hits say which of the two found them.
-    expect(body.results.map(item => item.key)).toEqual(["notes/body.md", "notes/mineral-plan.md"]);
-    expect(body.results.map(item => item.matched)).toEqual(["content", "name"]);
-    expect(body.nameMatches).toBe(1);
+    expect(body.nameMatches).toBe(2);
+    expect(body.results.find(hit => hit.key === "notes/mineral-plan.md")).toMatchObject({ matched: ["name", "content"], nameQuality: "prefix" });
+    expect(body.results.find(hit => hit.key === "notes/old-mineral.md")).toMatchObject({ matched: ["name"], nameQuality: "substring" });
+    expect(body.results.find(hit => hit.key === "notes/body.md")).toMatchObject({ matched: ["content"] });
+    // The document that carries both signals is one entry, not two.
+    expect(new Set(body.results.map(hit => hit.key)).size).toBe(body.results.length);
     expect(result.reads).toEqual([]);
   });
 
-  it("asks only for the fields the caller chose", async () => {
-    const result = await callTool({ hits: [{ key: "notes/a.md" }] }, { query: "mineral", searchIn: ["filename"] });
-    const body = JSON.parse(result.text) as { searchIn: string[]; results: Array<{ matched: string }> };
+  it("boosts a strong filename hit above a phrase buried in a body", async () => {
+    const result = await callTool({
+      results: [{ key: "daily/2026-01-02.md", snippet: "…提到 2026-06 一次…" }, { key: "daily/2026-05-01.md", snippet: "…也提到 2026-06…" }],
+      hits: [{ key: "daily/2026-06-18.md", modified: "2026-01-01T00:00:00.000Z", size: 10 }],
+    }, { query: "2026-06" });
+    const body = JSON.parse(result.text) as { results: Array<{ key: string; matched: string[] }>; ranking: string };
 
-    expect(body.searchIn).toEqual(["filename"]);
-    expect(body.results).toEqual([expect.objectContaining({ matched: "name" })]);
-    expect(result.reads).toEqual([]);
+    // The note whose *name* is the date wins, which is the answer a caller asking "2026-06" expects.
+    expect(body.results[0]).toMatchObject({ key: "daily/2026-06-18.md", matched: ["name"] });
+    // But the content hits are not displaced wholesale: they follow, in the index's own order.
+    expect(body.results.slice(1).map(hit => hit.key)).toEqual(["daily/2026-01-02.md", "daily/2026-05-01.md"]);
+  });
+
+  it("does not lift a weak filename hit above the full-text ranking", async () => {
+    const result = await callTool({
+      results: [{ key: "notes/body.md", snippet: "mineral" }],
+      hits: [{ key: "mineral/notes/other.md", modified: "2026-01-01T00:00:00.000Z", size: 10 }],
+    }, { query: "mineral" });
+    const body = JSON.parse(result.text) as { results: Array<{ key: string; matched: string[]; nameQuality?: string }> };
+
+    // The query is only in the *directory*, so it is reported and ranked after the content hit.
+    expect(body.results.map(hit => hit.key)).toEqual(["notes/body.md", "mineral/notes/other.md"]);
+    expect(body.results[1]).toMatchObject({ matched: ["name"], nameQuality: "path" });
+  });
+
+  it("asks only for the fields the caller chose", async () => {
+    const namesOnly = await callTool({ hits: [{ key: "notes/mineral.md" }] }, { query: "mineral", searchIn: ["filename"] });
+    const namesBody = JSON.parse(namesOnly.text) as { searchIn: string[]; ranking: string; results: Array<{ matched: string[]; nameQuality?: string }> };
+    expect(namesBody.searchIn).toEqual(["filename"]);
+    expect(namesBody.ranking).toBe("name");
+    // With no content signal to weigh against, a note named exactly this is simply the answer.
+    expect(namesBody.results).toEqual([expect.objectContaining({ matched: ["name"], nameQuality: "exact" })]);
+
+    const contentOnly = await callTool({ results: [{ key: "notes/a.md" }], hits: [{ key: "notes/b.md" }] }, { query: "mineral", searchIn: ["content"] });
+    const contentBody = JSON.parse(contentOnly.text) as { searchIn: string[]; results: Array<{ key: string; matched: string[] }> };
+    expect(contentBody.searchIn).toEqual(["content"]);
+    expect(contentBody.results.map(hit => hit.key)).toEqual(["notes/a.md"]);
+    expect(contentOnly.reads).toEqual([]);
   });
 });
