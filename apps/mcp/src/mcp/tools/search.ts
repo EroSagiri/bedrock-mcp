@@ -7,49 +7,19 @@ import { extractTags, extractWikilinks, parseFrontmatter } from "../../utils/mar
 import { buildMatcher, snippet, snippetAt } from "../../utils/search";
 import { relativeTime } from "../../utils/time";
 import { indexQuery, readModeSchemaDescription } from "../index-client";
+import { MAX_LIVE_SCAN_DOCUMENTS, refuseLargeLiveScan } from "../live-scan";
 import { assertTextKey, backupTextObject, err, keyError, moveObject, ok, stripTextExt, trashKey, wikilinkReplacement, type McpRegistrationContext } from "../shared";
 
-/**
- * The largest live content scan this tool will start.
- *
- * A live content search reads every candidate document through the Vault RPC, so the vault's size *is*
- * the subrequest count, and a Worker has a hard ceiling on those. Past it the runtime kills the
- * invocation mid-scan with "Too many subrequests by single Worker invocation" — an error that names
- * neither the cause nor the remedy, and that a vault crosses silently as it grows.
- *
- * So the size is checked first and refused with something actionable. The bound is deliberately
- * conservative: the ceiling itself depends on the account's plan, and a scan this tool refuses is one
- * `prefix` away from running.
- */
-export const MAX_LIVE_SCAN_DOCUMENTS = 200;
+// Re-exported because it is part of the search tool's documented contract, and a caller that wants to
+// explain the bound should not have to import the shared module to find it.
+export { MAX_LIVE_SCAN_DOCUMENTS };
 
-/**
- * How many documents a live scan with this prefix would read.
- *
- * Answered from the index in one projection read — the Documents list is the same one every other
- * indexed query uses, so this costs a single round trip rather than a scan of its own. An empty prefix
- * is the whole vault.
- */
-async function liveScanSize(ctx: McpRegistrationContext, prefix?: string): Promise<number> {
-  const page = await indexQuery(ctx.env, "documents", { prefix, limit: 1000 }) as { documents?: unknown[] };
-  return page.documents?.length ?? 0;
-}
-
-/**
- * The folders a caller can actually narrow to.
- *
- * "Add a prefix" is not advice when every top-level folder is itself too large — the caller then has to
- * guess. This names the ones that fit, so the remedy is a copy-pasteable value rather than a direction.
- */
-async function narrowPrefixes(ctx: McpRegistrationContext, excluded: string | undefined, limit = 5): Promise<Array<{ prefix: string; documents: number }>> {
-  const page = await indexQuery(ctx.env, "folders", {}) as { items?: Array<{ folder?: string; count?: number }> };
-  return (page.items ?? [])
-    .map(item => ({ folder: item.folder ?? "(root)", count: Number(item.count ?? 0) }))
-    .filter(item => item.folder !== "(root)" && item.count <= limit && item.folder !== excluded?.replace(/\/$/, ""))
-    .sort((left, right) => right.count - left.count)
-    .slice(0, 5)
-    .map(item => ({ prefix: `${item.folder}/`, documents: item.count }));
-}
+/** The exact shape `search` returns, as far as this tool reads it. */
+type ContentSearchResult = {
+  results?: Array<Record<string, unknown> & { key?: string }>;
+  partial?: boolean;
+  staleDocuments?: number;
+};
 
 export function registerSearchTools(ctx: McpRegistrationContext): void {
     /**
@@ -104,16 +74,27 @@ export function registerSearchTools(ctx: McpRegistrationContext): void {
         // its snippet come back from one SQLite query. Only an explicit `live` request walks the vault,
         // and that path is bounded because its cost is one read per document.
         if (mode === "index" && !regex && !cs && (fields.has("content") || (!fields.has("content") && !fields.has("frontmatter")))) {
-          const result = await indexQuery(ctx.env, "search", { query, prefix, limit: max }) as {
-            results?: unknown[]; partial?: boolean; staleDocuments?: number;
-          };
+          const content = await indexQuery(ctx.env, "search", { query, prefix, limit: max }) as ContentSearchResult;
+          const results: Array<Record<string, unknown>> = (content.results ?? []).map(result => ({ ...result, matched: "content" }));
+          // `searchIn` defaults to content *and* filename, and the content answer is a full-text one: a
+          // note whose *name* matches would otherwise be missing from a default search, silently. The
+          // name projection is a second indexed query, not a scan.
+          if (fields.has("filename") || fields.has("path")) {
+            const named = await indexQuery(ctx.env, "filename-search", { query, prefix, limit: max }) as { hits?: Array<{ key: string }> };
+            const known = new Set(results.map(result => result.key));
+            for (const hit of named.hits ?? []) {
+              if (hit.key && !known.has(hit.key)) results.push({ ...hit, matched: "name" });
+            }
+          }
           return ok(JSON.stringify({
-            ...result,
+            ...content,
+            results: results.slice(0, max),
+            nameMatches: results.filter(result => result.matched === "name").length,
             query,
             source: "index",
             // A search answered while documents are still unindexed is not a complete answer, and
             // saying so is the difference between "not found" and "not known yet".
-            ...(result.partial ? { note: `索引回填中：${result.staleDocuments ?? "?"} 篇尚未索引，本次结果可能不完整。` } : {}),
+            ...(content.partial ? { note: `索引回填中：${content.staleDocuments ?? "?"} 篇尚未索引，本次结果可能不完整。` } : {}),
           }, null, 2));
         }
 
@@ -131,24 +112,12 @@ export function registerSearchTools(ctx: McpRegistrationContext): void {
         // count. The size that matters is the one the scan will actually walk — a `prefix` narrows it,
         // and refusing a bounded search because the whole vault is large would make the remedy useless.
         if (needsContent) {
-          const count = await liveScanSize(ctx, prefix);
-          if (count > MAX_LIVE_SCAN_DOCUMENTS) {
-            return err(JSON.stringify({
-              error: "vault_too_large_for_live_content_search",
-              documents: count,
-              limit: MAX_LIVE_SCAN_DOCUMENTS,
-              scope: prefix ?? "(entire vault)",
-              detail: `实时内容检索会对每篇候选文档发起一次读取：${prefix ? `前缀 ${prefix} 下` : "本 vault 共"} ${count} 篇，超过单次调用的安全上限 ${MAX_LIVE_SCAN_DOCUMENTS}。`,
-              // Concrete enough to copy: an abstract "use a prefix" does not help when every
-              // top-level folder is itself too large.
-              narrowPrefixes: await narrowPrefixes(ctx, prefix),
-              remedies: [
-                "加 prefix 限定目录（见 narrowPrefixes 中能通过本上限的具体目录）",
-                "按文件名/路径检索：search_text 且 readMode='index'、searchIn=['filename','path']（走索引，不受此限）",
-                "按标签或frontmatter检索：tag_list_documents / search_frontmatter（走索引）",
-              ],
-            }, null, 2));
-          }
+          const refused = await refuseLargeLiveScan(ctx, {
+            prefix,
+            operation: "search_text content scan",
+            indexRemedy: "改用 readMode='index'（默认）：内容走 SQLite 全文索引，不读 R2，且不受此上限限制",
+          });
+          if (refused) return refused;
         }
 
         type Hit = { in: string; field?: string; value?: string; snippet?: string };
@@ -247,6 +216,12 @@ export function registerSearchTools(ctx: McpRegistrationContext): void {
       },
       async ({ field, value, contains, prefix, limit, readMode }) => {
         if ((readMode ?? "index") === "index") return ok(JSON.stringify(await indexQuery(ctx.env, "frontmatter", { field, value, contains, prefix, limit }), null, 2));
+        const refused = await refuseLargeLiveScan(ctx, {
+          prefix,
+          operation: "search_frontmatter live scan",
+          indexRemedy: "改用 readMode='index'（默认）：frontmatter 已进索引，结果相同且不读 R2",
+        });
+        if (refused) return refused;
         const matches = await scanTextFiles(ctx.env.vault.documents, prefix, (k, text, o) => {
           const { frontmatter } = parseFrontmatter(text);
           if (!frontmatter || !(field in frontmatter)) return null;

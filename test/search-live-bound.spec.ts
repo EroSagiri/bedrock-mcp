@@ -90,16 +90,59 @@ describe("a live scan is still bounded", () => {
     const result = await callTool({ documents: MAX_LIVE_SCAN_DOCUMENTS + 1 }, { query: "mineral", readMode: "live" });
 
     expect(result.isError).toBe(true);
-    const report = JSON.parse(result.text) as { error: string; documents: number; limit: number; remedies: string[] };
-    expect(report.error).toBe("vault_too_large_for_live_content_search");
+    const report = JSON.parse(result.text) as { error: string; operation: string; documents: number; limit: number; remedies: string[] };
+    // One error shape for every live path: a content scan, a tag scan and a frontmatter scan all fail the
+    // same way when they are unbounded, so a caller only has to recognise one of them.
+    expect(report.error).toBe("vault_too_large_for_live_scan");
+    expect(report.operation).toContain("content");
     expect(report.documents).toBe(MAX_LIVE_SCAN_DOCUMENTS + 1);
     expect(report.limit).toBe(MAX_LIVE_SCAN_DOCUMENTS);
     expect(report.remedies.join(" ")).toContain("prefix");
+    expect(report.remedies.join(" ")).toContain("index");
     expect(result.reads).toEqual([]);
   });
 
   it("runs a live scan on a vault within the bound", async () => {
     const result = await callTool({ documents: MAX_LIVE_SCAN_DOCUMENTS }, { query: "mineral", readMode: "live" });
     expect(result.text).toContain('"query": "mineral"');
+  });
+});
+
+describe("a default content search also finds a note by name", () => {
+  it("merges the filename projection into the content hits", async () => {
+    const reads: string[] = [];
+    const server = new McpServer({ name: "search-test", version: "1.0.0" });
+    registerSearchTools({
+      server,
+      env: {
+        vault: {
+          ...vault({ documents: 3, reads }),
+          index: {
+            async query(kind: string) {
+              if (kind === "search") return { results: [{ key: "notes/body.md", snippet: "mineral" }], staleDocuments: 0, partial: false };
+              if (kind === "filename-search") return { hits: [{ key: "notes/mineral-plan.md", modified: "2026-01-01T00:00:00.000Z", size: 10 }, { key: "notes/body.md", modified: "2026-01-01T00:00:00.000Z", size: 10 }] };
+              return {};
+            },
+          },
+        },
+      } as unknown as Env,
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "test-client", version: "1.0.0" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const result = await client.callTool({ name: "search_text", arguments: { query: "mineral" } });
+      const body = JSON.parse((result.content as Array<{ text: string }>).map(part => part.text).join("")) as {
+        results: Array<{ key: string; matched: string }>; nameMatches: number;
+      };
+      // The name match is present rather than silently missing, the content hit is not duplicated, and the
+      // hits say which of the two found them.
+      expect(body.results.map(item => item.key)).toEqual(["notes/body.md", "notes/mineral-plan.md"]);
+      expect(body.results.map(item => item.matched)).toEqual(["content", "name"]);
+      expect(body.nameMatches).toBe(1);
+      expect(reads).toEqual([]);
+    } finally {
+      await client.close();
+    }
   });
 });

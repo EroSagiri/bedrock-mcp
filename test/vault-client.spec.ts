@@ -137,6 +137,6 @@ describe("Vault RPC client repair", () => {
 
     // The write still succeeded; only the report is impossible, and that is reported as such.
     expect(failures).toEqual(["mutation repair unsupported id=mut_legacy"]);
-    expect(vault.recordCommittedMutation({ id: "x", source: "mcp", op: "delete", path: "a.md", committedAt: 1 })).resolves.toBeNull();
+    await expect(vault.recordCommittedMutation({ id: "x", source: "mcp", op: "delete", path: "a.md", committedAt: 1 })).resolves.toBeNull();
   });
 });

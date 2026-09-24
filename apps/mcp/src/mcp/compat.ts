@@ -132,7 +132,7 @@ const TOOL_METADATA: Record<string, {
     category: "search",
     risk: "read",
     title: "Search text",
-    description: "Search filenames, paths, or original Markdown content.",
+    description: "Search filenames, paths, or original Markdown content. Chinese is matched as a substring of the note text, so a word inside a sentence is found; Latin terms go through the full-text index and are ranked by relevance.",
   },
   search_frontmatter: {
     category: "search",
@@ -196,11 +196,11 @@ const TOOL_METADATA: Record<string, {
   },
   tag_list: {
     category: "search", risk: "read", title: "List tags",
-    description: "List normalized frontmatter/body tags from the metadata index or a live Vault traversal.",
+    description: "List normalized frontmatter/body tags from the metadata index. `contains` finds a tag by a fragment of its name; live mode is refused on a vault too large to walk.",
   },
   tag_list_documents: {
     category: "search", risk: "read", title: "List tag documents",
-    description: "List documents and per-source occurrences for a normalized tag.",
+    description: "List the documents that carry a tag, and say whether an empty result means the tag does not exist or simply has no notes in the requested scope.",
   },
   vault_stats: {
     category: "vault",

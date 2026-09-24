@@ -3,6 +3,7 @@ import { SqlMutationStore, type SqlDatabase } from "../index/journal-store";
 import { CURRENT_INDEX_VERSION, INDEX_SCHEMA_VERSION, LIVE_INDEX_SCHEMA, freshnessStatus, type FreshnessRow, type IndexedDocument } from "../index/live-store";
 import { isIndexable } from "../index/indexable";
 import { parseDocument } from "../index/parse";
+import { planTextQuery, type TextQueryPlan } from "../index/text-query";
 import type { IndexAction, IndexIntentSpec } from "../index/intents";
 import { AUDIT_SCHEMA, type IndexAudit } from "../index/audit";
 import { SqlVectorStore, type DueVectorIntent, type VectorClaim, type VectorHealth, type VectorQueueSummary } from "../vector/store";
@@ -766,7 +767,13 @@ export class VaultIndex extends DurableObject<Env> {
     if (kind === "tags") {
       const sources = (input.sources as string[] | undefined) ?? ["frontmatter", "body"];
       const sourceMarks = sources.map(() => "?").join(","); const tagPrefix = String(input.tagPrefix ?? "");
-      const data = rows(this.db.exec(`SELECT tag, SUM(occurrences) referenceCount, COUNT(DISTINCT document_id) documentCount, SUM(CASE WHEN source='frontmatter' THEN occurrences ELSE 0 END) frontmatterReferences, SUM(CASE WHEN source='body' THEN occurrences ELSE 0 END) bodyReferences FROM document_tags WHERE source IN (${sourceMarks}) AND tag LIKE ? GROUP BY tag HAVING referenceCount >= ? ORDER BY tag LIMIT ?`, ...sources, `${tagPrefix}%`, Number(input.minReferences ?? 1), limit));
+      // A tag is a name someone is trying to recall, so a prefix is not enough on its own: `contains`
+      // searches inside the name, which is what "find the tag about 跑" needs.
+      const clauses = [`source IN (${sourceMarks})`, "tag LIKE ? ESCAPE '\\'"];
+      const args: unknown[] = [...sources, `${escapeLike(tagPrefix)}%`];
+      const contains = input.tagContains === undefined || input.tagContains === null ? "" : String(input.tagContains);
+      if (contains) { clauses.push("tag LIKE ? ESCAPE '\\'"); args.push(likeContains(contains)); }
+      const data = rows(this.db.exec(`SELECT tag, SUM(occurrences) referenceCount, COUNT(DISTINCT document_id) documentCount, SUM(CASE WHEN source='frontmatter' THEN occurrences ELSE 0 END) frontmatterReferences, SUM(CASE WHEN source='body' THEN occurrences ELSE 0 END) bodyReferences FROM document_tags WHERE ${clauses.join(" AND ")} GROUP BY tag HAVING referenceCount >= ? ORDER BY tag LIMIT ?`, ...args, Number(input.minReferences ?? 1), limit));
       return { ...meta, source: "index", tags: data };
     }
     if (kind === "tag-documents") {
@@ -812,7 +819,7 @@ export class VaultIndex extends DurableObject<Env> {
       }
       return { ...meta, source: "index", ...graph };
     }
-    if (kind === "filename-search") return { ...meta, source: "index", hits: rows(this.db.exec("SELECT key, modified, size FROM documents WHERE key LIKE ? AND key LIKE ? ORDER BY modified DESC LIMIT ?", `${prefix}%`, `%${String(input.query)}%`, limit)) };
+    if (kind === "filename-search") return { ...meta, source: "index", hits: rows(this.db.exec("SELECT key, modified, size FROM documents WHERE key LIKE ? ESCAPE '\\' AND key LIKE ? ESCAPE '\\' ORDER BY modified DESC LIMIT ?", `${escapeLike(prefix)}%`, likeContains(String(input.query)), limit)) };
     if (kind === "search") return this.search(input);
     if (kind === "stale-count") return { ...meta, source: "index", stale: this.staleCount() };
     return { ...meta, source: "index", documents: rows(this.db.exec("SELECT key, indexed_etag etag, modified, size, content_type contentType FROM documents WHERE key LIKE ? ORDER BY modified DESC LIMIT ?", `${prefix}%`, limit)) };
@@ -824,23 +831,76 @@ export class VaultIndex extends DurableObject<Env> {
    * The result carries `partial` because the index can be mid-backfill: a search that silently
    * returned three hits while forty documents were still unindexed would be a false negative that
    * looks exactly like an answer.
+   *
+   * Latin terms are matched by FTS5, whose bm25 ranking is the reason the index exists. A query with CJK
+   * in it cannot be: `unicode61` never split CJK into words, so FTS5 would be asked whether 心率 is a
+   * token, and the answer would be no for every note that has the word inside a sentence. Those runs are
+   * matched as substrings instead, ranked by where they appear and how often. `ranking` says which of the
+   * two answered, because the scores are not comparable.
    */
   private search(input: Record<string, unknown>): Row {
     const query = String(input.query ?? "").trim();
     const limit = Math.min(Number(input.limit ?? 20), 200);
     const prefix = String(input.prefix ?? "");
-    if (!query) return { ...this.freshness(), source: "index", query, results: [], partial: this.staleCount() > 0 };
-    const results = rows(this.db.exec(
-      `SELECT d.key, d.title, d.modified, d.size,
-              snippet(documents_fts, 4, '', '', '…', 12) snippet,
-              bm25(documents_fts, 10.0, 0.0, 4.0, 2.0, 1.0) score
-       FROM documents_fts JOIN documents d ON d.id = documents_fts.rowid
-       WHERE documents_fts MATCH ? AND d.key LIKE ?
-       ORDER BY score LIMIT ?`,
-      query, `${prefix}%`, limit,
-    ));
     const stale = this.staleCount();
-    return { ...this.freshness(), source: "index", query, results, staleDocuments: stale, partial: stale > 0 };
+    const meta = { ...this.freshness(), source: "index", query, staleDocuments: stale, partial: stale > 0 };
+    if (!query) return { ...meta, results: [] };
+
+    const plan = planTextQuery(query);
+    if (plan.empty) return { ...meta, results: [] };
+    if (plan.hasCjk) return { ...meta, ranking: "phrase", results: this.searchCjk({ plan, prefix, limit }) };
+
+    return {
+      ...meta,
+      ranking: "bm25",
+      results: rows(this.db.exec(
+        `SELECT d.key, d.title, d.modified, d.size,
+                snippet(documents_fts, 4, '', '', '…', 12) snippet,
+                bm25(documents_fts, 10.0, 0.0, 4.0, 2.0, 1.0) score
+         FROM documents_fts JOIN documents d ON d.id = documents_fts.rowid
+         WHERE documents_fts MATCH ? AND d.key LIKE ?
+         ORDER BY score LIMIT ?`,
+        plan.match!, `${prefix}%`, limit,
+      )),
+    };
+  }
+
+  /**
+   * The CJK half: substring matching, scored by where the phrase appears.
+   *
+   * A substring scan is affordable because the text is already in SQLite — this reads no document from
+   * R2 — and because a vault that outgrows it wants a real segmenter rather than a bigger index. The
+   * score is a deliberate ordering, not a relevance model: a phrase in the title beats one in a heading,
+   * which beats a tag, which beats the body, and more occurrences beat fewer.
+   */
+  private searchCjk(input: { plan: TextQueryPlan; prefix: string; limit: number }): Row[] {
+    const { plan, prefix, limit } = input;
+    const anchor = plan.anchor!;
+    const haystack = `COALESCE(documents_fts.title, '') || ' ' || COALESCE(documents_fts.headings, '') || ' ' || COALESCE(documents_fts.tags, '') || ' ' || COALESCE(documents_fts.body, '')`;
+    const conditions = plan.cjkRuns.map(() => `instr(${haystack}, ?) > 0`);
+    if (plan.match) conditions.unshift("documents_fts MATCH ?");
+    // The anchor drives both the ranking and the snippet.
+    const score = [
+      `CASE WHEN instr(COALESCE(documents_fts.title, ''), ?) > 0 THEN 100 ELSE 0 END`,
+      `CASE WHEN instr(COALESCE(documents_fts.headings, ''), ?) > 0 THEN 40 ELSE 0 END`,
+      `CASE WHEN instr(COALESCE(documents_fts.tags, ''), ?) > 0 THEN 30 ELSE 0 END`,
+      `CASE WHEN instr(COALESCE(documents_fts.body, ''), ?) > 0 THEN 10 ELSE 0 END`,
+      `(LENGTH(COALESCE(documents_fts.body, '')) - LENGTH(REPLACE(COALESCE(documents_fts.body, ''), ?, ''))) / LENGTH(?)`,
+    ].join(" + ");
+    const snippet = `CASE WHEN instr(COALESCE(documents_fts.body, ''), ?) > 60 THEN '…' ELSE '' END
+       || SUBSTR(COALESCE(documents_fts.body, ''), MAX(1, instr(COALESCE(documents_fts.body, ''), ?) - 60), 150)`;
+    // SQLite binds by position in the statement text, and the statement text puts the two computed columns
+    // in the SELECT list — before the WHERE clause they are derived from. The array is therefore built in
+    // exactly that order, which is the one thing about this query worth being careful with.
+    const fromSelectList = [anchor, anchor, anchor, anchor, anchor, anchor, anchor, anchor];
+    const fromWhere = [...(plan.match ? [plan.match] : []), ...plan.cjkRuns];
+    return rows(this.db.exec(
+      `SELECT d.key, d.title, d.modified, d.size, (${snippet}) snippet, (${score}) score
+       FROM documents_fts JOIN documents d ON d.id = documents_fts.rowid
+       WHERE ${conditions.join(" AND ")} AND d.key LIKE ?
+       ORDER BY score DESC, d.modified DESC LIMIT ?`,
+      ...fromSelectList, ...fromWhere, `${prefix}%`, limit,
+    ));
   }
 
   /**
@@ -868,6 +928,21 @@ export class VaultIndex extends DurableObject<Env> {
 async function sha256Hex(text: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
   return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * Escapes the three characters `LIKE` treats as syntax.
+ *
+ * Without it a search for `100%` matches everything and a search for `a_b` matches `axb` — the wildcards
+ * in a *query* are almost never intended, and a caller that wants a wildcard has the full-text search.
+ * Every `LIKE` in this file therefore carries `ESCAPE '\'`.
+ */
+function escapeLike(value: string): string {
+  return value.replace(/[\\%_]/g, character => `\\${character}`);
+}
+
+function likeContains(value: string): string {
+  return `%${escapeLike(value)}%`;
 }
 
 
