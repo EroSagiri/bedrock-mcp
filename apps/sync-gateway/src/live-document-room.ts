@@ -843,10 +843,18 @@ export class LiveDocumentRoom extends DurableObject<GatewayHotEnv> {
    * Sockets
    * ------------------------------------------------------------------------------------------ */
 
-  private broadcast(message: unknown, except?: WebSocket): void {
+  private broadcast(message: unknown, except?: WebSocket, exceptClientId?: string): void {
     const payload = JSON.stringify(message);
     for (const socket of this.ctx.getWebSockets()) {
       if (socket === except) continue;
+      // One logical client can briefly have two sockets during plugin reload or reconnect overlap.
+      // Relaying its own operation through the older socket turns a local edit into a remote editor
+      // write and creates a same-device feedback loop. Client identity, not socket object identity, is
+      // the echo-suppression boundary.
+      if (exceptClientId) {
+        const attachment = socket.deserializeAttachment() as { clientId?: string } | null;
+        if (attachment?.clientId === exceptClientId) continue;
+      }
       try { socket.send(payload); } catch { try { socket.close(1011, "send failed"); } catch {} }
     }
   }
@@ -920,7 +928,7 @@ export class LiveDocumentRoom extends DurableObject<GatewayHotEnv> {
       }
       if (!outcome.duplicate) {
         const broadcast: HotServerOperation = { ...frame, serverRevision: outcome.revision };
-        this.broadcast(broadcast, socket);
+        this.broadcast(broadcast, socket, clientId);
       }
       this.send(socket, {
         protocol: HOT_PROTOCOL_VERSION,
@@ -1191,4 +1199,3 @@ function parseTarget(value: unknown): RoomCheckpointTarget | null {
     return null;
   }
 }
-

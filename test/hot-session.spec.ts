@@ -124,6 +124,30 @@ async function sessionFor(path: string, clientId: string, local: string | null) 
 }
 
 describe("hot session: acquisition and realtime convergence", () => {
+  it("does not relay an operation into an older socket owned by the same logical client", async () => {
+    const path = "notes/hot-same-client-reload.md";
+    const oldInstance = await sessionFor(path, "client-a", null);
+    const newInstance = await sessionFor(path, "client-a", null);
+    expect(newInstance.identity).toEqual(oldInstance.identity);
+
+    const local = client();
+    newInstance.socket.send(operationFrame({
+      identity: newInstance.identity,
+      clientId: "client-a",
+      clientOperationId: "op-after-reload",
+      update: local.edit(text => text.insert(0, "one local edit")),
+      parentRevision: 0,
+    }));
+    expect(await newInstance.frames.until(frame => frame.type === "ack")).toMatchObject({ serverRevision: 1, duplicate: false });
+
+    // Broadcasting happens before the acknowledgement. If socket identity rather than client identity
+    // were used for suppression, the old plugin instance would already have received this operation
+    // and could write it back into the same Obsidian editor as a fresh local event.
+    expect(oldInstance.frames.pending().filter(frame => frame.type === "operation")).toEqual([]);
+    oldInstance.socket.close();
+    newInstance.socket.close();
+  });
+
   it("creates an incarnation for a free path, joins it from a second client, and converges", async () => {
     const path = "notes/hot-converge.md";
     const first = await sessionFor(path, "client-a", null);
