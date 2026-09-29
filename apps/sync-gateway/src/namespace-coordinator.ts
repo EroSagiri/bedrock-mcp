@@ -649,6 +649,16 @@ export class NamespaceCoordinator extends DurableObject<GatewayNamespaceEnv> {
     console.log(`namespace ${message}`);
   }
 
+  /**
+   * Reports a service-binding failure on the conversation. The wire-level `NamespaceResult` does not
+   * carry a `detail` field, so the message stays on the diagnostics side and the typed answer
+   * (`rejected` / `unavailable`) is what the caller sees.
+   */
+  private logError(kind: string, error: unknown): void {
+    const detail = error instanceof Error ? error.message : "unknown";
+    console.log(`namespace ${kind} failure: ${detail}`);
+  }
+
   private outcome(input: {
     intent: NamespaceIntent;
     path: string;
@@ -817,13 +827,48 @@ export class NamespaceCoordinator extends DurableObject<GatewayNamespaceEnv> {
     // value is a fallback for a retry that resumes after the quiesce phase.
     const description = await room.identity().catch(() => null);
     const expected = expectedFromRoom ?? description?.expectedRemoteETag ?? intent.expectedRemoteETag ?? null;
-    const deletion: HotDeleteResult = await vault.deleteHotDocument({
-      canonicalPath: path,
-      documentId: intent.documentId,
-      epoch: intent.expectedEpoch,
-      commitId: await this.commitIdFor(intent.operationId),
-      expectedRemoteETag: expected,
-    });
+    /**
+     * Both the room's `identity()` and the vault RPC are service bindings; a transient failure has to
+     * surface as a typed `rejected` outcome rather than throw past the namespace API. Throwing here is
+     * what made Vitest exit 1 on a successful test run: 293 assertions passed, the recovery state
+     * machine was correct, but two unhandled rejections escaped the loop and the runner treated the
+     * whole file as failing.
+     */
+    let deletion: HotDeleteResult;
+    try {
+      const commitId = await this.commitIdFor(intent.operationId);
+      deletion = await vault.deleteHotDocument({
+        canonicalPath: path,
+        documentId: intent.documentId,
+        epoch: intent.expectedEpoch,
+        commitId,
+        expectedRemoteETag: expected,
+      });
+    } catch (error) {
+      this.logError(`delete ${intent.operationId}`, error);
+      const current = this.bindingRow(path);
+      const result = this.outcome({
+        intent,
+        path,
+        fromPath: null,
+        outcome: "rejected",
+        reason: "unavailable",
+        phase: "r2-applied",
+        binding: current ? this.toBinding(current) : binding,
+      });
+      // The durable phase deliberately stays at `r2-applied` (not `failed`): the room's alarm retries
+      // any phase outside the terminal pair, so a transient RPC blip becomes another attempt on the
+      // next tick rather than a path the alarm has given up on. The typed outcome is what the *current*
+      // caller sees; a future caller asking with the same operation id reads the durable phase and the
+      // alarm retries it until success or until MAX_NAMESPACE_RESUME_ATTEMPTS forces an explicit
+      // release.
+      this.recordOperation(intent, "r2-applied", result);
+      // The binding stays `quiescing`: this is the seam a client that walked away leaves behind. The
+      // alarm retries the operation a bounded number of times and then calls `releaseQuiescingBinding`
+      // explicitly, so a transient RPC blip is recovered by the durable object's own clock rather than
+      // by an immediate, optimistic resume.
+      return result;
+    }
     if (deletion.status !== "deleted") {
       const current = this.bindingRow(path);
       const reason: NamespaceReason = deletion.status === "conflict"
@@ -913,17 +958,48 @@ export class NamespaceCoordinator extends DurableObject<GatewayNamespaceEnv> {
     }
     this.recordOperation(intent, "checkpointed", null);
 
-    const moved: HotMoveResult = await vault.moveHotDocument({
-      fromPath,
-      toPath,
-      documentId: intent.documentId,
-      epoch: intent.expectedEpoch,
-      documentRevision: quiesced.documentRevision,
-      commitId: await this.commitIdFor(intent.operationId),
-      contentHash: quiesced.contentHash,
-      markdown: quiesced.markdown,
-      expectedFromETag: quiesced.expectedRemoteETag,
-    });
+    /**
+     * The vault RPC is a service binding; a transient failure must become a typed `rejected` outcome
+     * rather than throw past the namespace API. See `delete()` for the rationale that also applies
+     * here: the test harness exits non-zero on any unhandled rejection, so an RPC blip becomes a
+     * build break instead of an honest "this operation did not land" answer.
+     */
+    let moved: HotMoveResult;
+    try {
+      const commitId = await this.commitIdFor(intent.operationId);
+      moved = await vault.moveHotDocument({
+        fromPath,
+        toPath,
+        documentId: intent.documentId,
+        epoch: intent.expectedEpoch,
+        documentRevision: quiesced.documentRevision,
+        commitId,
+        contentHash: quiesced.contentHash,
+        markdown: quiesced.markdown,
+        expectedFromETag: quiesced.expectedRemoteETag,
+      });
+    } catch (error) {
+      this.logError(`rename ${intent.operationId}`, error);
+      const current = this.bindingRow(fromPath);
+      const result = this.outcome({
+        intent,
+        path: toPath,
+        fromPath,
+        outcome: "rejected",
+        reason: "unavailable",
+        phase: "r2-applied",
+        binding: current ? this.toBinding(current) : fromBinding,
+        fromBinding: current ? this.toBinding(current) : fromBinding,
+      });
+      // The durable phase stays at `r2-applied` (not `failed`); see `delete` for the rationale. The
+      // alarm retries until success or `MAX_NAMESPACE_RESUME_ATTEMPTS` forces a release.
+      this.recordOperation(intent, "r2-applied", result);
+      // Same contract as `delete`: the source path stays `quiescing` until the alarm either retries
+      // successfully or exhausts attempts and explicitly releases the binding. An immediate resume
+      // would race the next retry and could fence the path in a state the durable record does not
+      // agree with.
+      return result;
+    }
     if (moved.status !== "moved") {
       const reason: NamespaceReason = moved.status === "conflict"
         ? moved.reason === "target-exists" ? "target-exists" : moved.reason === "remote-deleted" ? "remote-deleted" : "remote-changed"
