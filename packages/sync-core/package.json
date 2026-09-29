@@ -1,6 +1,6 @@
 {
   "name": "@mineral/sync-core",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "Cross-repository sync control-plane contracts, channel derivation, and generation cursors.",
@@ -25,6 +25,26 @@
       "types": "./dist/gateway-subscribe.d.ts",
       "import": "./dist/gateway-subscribe.js",
       "default": "./dist/gateway-subscribe.js"
+    },
+    "./hot-protocol": {
+      "types": "./dist/hot-protocol.d.ts",
+      "import": "./dist/hot-protocol.js",
+      "default": "./dist/hot-protocol.js"
+    },
+    "./namespace-protocol": {
+      "types": "./dist/namespace-protocol.d.ts",
+      "import": "./dist/namespace-protocol.js",
+      "default": "./dist/namespace-protocol.js"
+    },
+    "./tombstones": {
+      "types": "./dist/tombstones.d.ts",
+      "import": "./dist/tombstones.js",
+      "default": "./dist/tombstones.js"
+    },
+    "./paths": {
+      "types": "./dist/paths.d.ts",
+      "import": "./dist/paths.js",
+      "default": "./dist/paths.js"
     }
   },
   "scripts": {
@@ -35,3 +55,4 @@
     "typescript": "^5.5.2"
   }
 }
+

@@ -12,6 +12,7 @@
     "deploy:vault": "wrangler deploy --config apps/vault/wrangler.jsonc",
     "deploy:sync-gateway": "wrangler deploy --config apps/sync-gateway/wrangler.jsonc",
     "deploy:vault:bootstrap": "wrangler deploy --config apps/vault/wrangler.bootstrap.jsonc",
+    "verify:hot": "node scripts/verify-hot-sync.mjs",
     "dev": "npm run dev:mcp",
     "dev:mcp": "wrangler dev --config apps/mcp/wrangler.jsonc",
     "dev:vault": "wrangler dev --config apps/vault/wrangler.jsonc",
@@ -19,8 +20,9 @@
     "dev:worker": "npm run dev:mcp",
     "start": "npm run dev:mcp",
     "test": "vitest",
-    "build": "npm run validate:bindings && npm run build:mcp && npm run build:vault && npm run build:sync-gateway",
+    "build": "npm run validate:bindings && npm run validate:layering && npm run build:mcp && npm run build:vault && npm run build:sync-gateway",
     "validate:bindings": "node scripts/validate-worker-bindings.mjs",
+    "validate:layering": "node scripts/validate-sync-core-layering.mjs",
     "build:mcp": "wrangler deploy --dry-run --outdir dist/mcp --config apps/mcp/wrangler.jsonc",
     "build:vault": "wrangler deploy --dry-run --outdir dist/vault --config apps/vault/wrangler.jsonc",
     "build:sync-gateway": "wrangler deploy --dry-run --outdir dist/sync-gateway --config apps/sync-gateway/wrangler.jsonc",
@@ -52,3 +54,4 @@
     "zod": "^4.3.6"
   }
 }
+

@@ -2,6 +2,11 @@
 
 自托管的 Obsidian 知识库后端：三个 Cloudflare Worker、两个索引、一个 Mutation Journal。先读 [README.md](README.md) 了解全局，再读 [docs/](docs/) 里对应那一层。**不要**在没有读过 `docs/indexing.md` 的情况下改索引，它是唯一说明发布顺序与接受规则的地方。
 
+热同步（实时协作）已实现并部署：设计见 `docs/hot-sync-design.md`，实现与验证证据见
+`docs/hot-sync-implementation.md`。改 `apps/sync-gateway/src/{live-document-room,namespace-coordinator}.ts`、
+`apps/vault/src/hot/**` 或 `packages/sync-core/src/{hot-protocol,namespace-protocol,tombstones}.ts` 之前先读后者，
+那里列了哪些不变量已被测试锁死、哪些是有意未做。协议改动必须重新 `npm pack` 并 vendor 进插件仓库。
+
 ## 不变量（改任何东西之前先看这条）
 
 1. **R2 是内容的事实源，索引是检索的事实源。** 搜索只问索引，精确读取才问 R2。没有 `readMode`，没有实扫回退 —— 索引不能回答时要**明说**不能，不能偷偷走一遍全库。

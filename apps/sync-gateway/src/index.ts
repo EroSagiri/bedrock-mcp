@@ -2,20 +2,24 @@ import { WorkerEntrypoint } from "cloudflare:workers";
 import type { MarkRemoteDirtyRequest, MarkRemoteDirtyResult } from "@mineral/sync-core/sync-change";
 import { createGatewayWebSocketTicket, isRemoteChangeChannel } from "@mineral/sync-core/gateway-protocol";
 import { isAuthorized, isSubscribeAuthorized } from "./auth";
+import { handleHotRoute, hotAction, type HotRouteEnv } from "./hot-routes";
+import { NamespaceCoordinator } from "./namespace-coordinator";
 import { RemoteChangeHub } from "./remote-change-hub";
 import { handleMutationReport, type VaultMutationBinding } from "./mutations";
 import { parseDirtyRequest, validRpcRequest } from "./validation";
 
 export { RemoteChangeHub } from "./remote-change-hub";
+export { NamespaceCoordinator } from "./namespace-coordinator";
+export { LiveDocumentRoom } from "./live-document-room";
 export { handleMutationReport, verdictStatus, type VaultMutationBinding } from "./mutations";
 
-export type GatewayEnv = {
+export type GatewayEnv = HotRouteEnv & {
   REMOTE_CHANGE_HUB: DurableObjectNamespace<RemoteChangeHub>;
   SYNC_GATEWAY_TOKEN: string;
   /**
    * The Vault, for the one thing a client cannot be trusted to do itself: reporting a mutation that
-   * must be verified against R2. The Gateway relays the report and returns the Vault's verdict; it
-   * holds no R2 credential and reads no object.
+   * must be verified against R2, and the hot checkpoint acts only the Vault may perform. The Gateway
+   * relays and returns the verdict; it holds no R2 credential and reads no object.
    */
   VAULT?: VaultMutationBinding;
 };
@@ -27,6 +31,9 @@ type GatewayAction = "read" | "dirty" | "subscribe" | "ticket" | "mutations";
 
 const noStore = { "Cache-Control": "no-store", "Content-Type": "application/json" };
 const error = (status: number, code: string) => Response.json({ error: code }, { status, headers: noStore });
+
+/** The `/v1/channels/{channel}/hot/...` half of the control plane. */
+const HOT_ROUTE = /^\/v1\/channels\/([^/]+)\/(hot\/[A-Za-z/-]+)$/;
 
 function route(pathname: string): { channel: string; action: GatewayAction } | null {
   const match = /^\/v1\/channels\/([^/]+)(?:\/(dirty|subscribe|ticket|mutations))?$/.exec(pathname);
@@ -53,6 +60,17 @@ export class SyncGatewayEntrypoint extends WorkerEntrypoint<GatewayEnv> {
 export default class SyncGateway extends WorkerEntrypoint<GatewayEnv> {
   async fetch(request: Request): Promise<Response> {
     const pathname = new URL(request.url).pathname;
+    // Hot sessions are routed first, and separately, because their authentication is different in one
+    // specific way: a WebSocket cannot carry a header, so the hot session route is authorized by a
+    // ticket that is scoped to one document epoch and one client. Everything else in this worker keeps
+    // the original rule — bearer only, checked before any Durable Object is addressed.
+    const hot = HOT_ROUTE.exec(pathname);
+    if (hot && isRemoteChangeChannel(hot[1])) {
+      const action = hotAction(hot[2]);
+      if (!action) return error(404, "not_found");
+      if (action !== "session" && !(await isAuthorized(request, this.env.SYNC_GATEWAY_TOKEN))) return error(401, "unauthorized");
+      return (await handleHotRoute(request, hot[1], action, this.env)) ?? error(404, "not_found");
+    }
     const parsed = route(pathname);
     if (!parsed) return pathname.startsWith("/v1/channels/") ? error(400, "invalid_channel") : error(404, "not_found");
     if (parsed.action === "subscribe" && request.method !== "GET") return error(405, "method_not_allowed");

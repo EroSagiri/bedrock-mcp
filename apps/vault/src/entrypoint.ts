@@ -1,6 +1,13 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
 import type {
   DeleteDocumentsResult,
+  HotCheckpointInput,
+  HotCheckpointResult,
+  HotDeleteInput,
+  HotDeleteResult,
+  HotMoveInput,
+  HotMoveResult,
+  HotPathObservation,
   ListDocumentsInput,
   ListDocumentsResult,
   PutDocumentInput,
@@ -8,6 +15,8 @@ import type {
   VaultRpcDocument,
   VaultRpcDocumentMetadata,
 } from "@mineral/core/vault-rpc";
+import { createHotCheckpoint, type HotCheckpoint } from "./hot/checkpoint";
+import { isHotCheckpointInput, isHotDeleteInput, isHotMoveInput, isHotObserveInput } from "./hot/inputs";
 import { createVaultService, type VaultDocumentMetadata, type VaultService, type VaultWriteResult } from "./service";import type { VaultIndex, VectorizeBinding } from "./durable/vault-index";
 import { createMutationIngress, handleJournalStateRequest, handleMutationIngressRequest, MutationIngressError } from "./mutation/http";
 import { parseCommittedMutation, recordCommittedMutationUntilRecorded, REPAIR_ATTEMPTS, type CommittedMutationInput } from "./mutation/committed";
@@ -134,8 +143,7 @@ export default class VaultEntrypoint extends WorkerEntrypoint<VaultWorkerEnv> {
    * A refused report is a verdict, not an exception: the caller needs the distinction, and a thrown
    * error would flatten "the revision is wrong" into "the RPC failed".
    */
-  async recordReportedMutation(input: ReportedMutation): Promise<MutationVerdict> {
-    if (!isReportedMutation(input)) return { verdict: "refused", reason: "invalid" };
+  async recordReportedMutation(input: ReportedMutation): Promise<MutationVerdict> {    if (!isReportedMutation(input)) return { verdict: "refused", reason: "invalid" };
     const event: MutationEvent = input.op === "put"
       ? { id: input.id, source: "obsidian", op: "put", path: input.path, etag: input.etag, size: input.size, committedAt: Math.floor(input.committedAt) }
       : { id: input.id, source: "obsidian", op: "delete", path: input.path, committedAt: Math.floor(input.committedAt), ...(input.etag ? { etag: input.etag } : {}) };
@@ -151,6 +159,70 @@ export default class VaultEntrypoint extends WorkerEntrypoint<VaultWorkerEnv> {
       console.error(`mutation report failed id=${event.id} error=${error instanceof Error ? error.message.slice(0, 200) : "unknown"}`);
       return { verdict: "refused", reason: "unavailable" };
     }
+  }
+
+  /**
+   * The hot checkpoint surface (Phase Hot-B).
+   *
+   * The LiveDocumentRoom owns the CRDT, the checkpoint schedule, and the recovery state machine; the
+   * Vault owns R2 and the journal. These four methods are the entire seam, and each one is a
+   * *conditional* act: the caller states the revision it believes it is building on, and a mismatch
+   * comes back as a conflict rather than being resolved by whoever wrote last.
+   *
+   * The seam is deliberately narrow for the same reason the reported-mutation relay is: a component
+   * that may write R2 must be the component that owns the journal and the prefix composition, or the
+   * two drift and the drift is invisible.
+   */
+  protected hotCheckpoint(): HotCheckpoint {
+    return createHotCheckpoint({
+      bucket: this.env.MINERAL,
+      prefix: this.env.MINERAL_REMOTE_PREFIX ?? "",
+      record: async input => {
+        try {
+          const recorded = await this.service().mutations.record({
+            id: input.id,
+            source: "obsidian",
+            committedAt: Date.now(),
+            ...(input.op === "put"
+              ? { op: "put" as const, path: input.path, etag: input.etag, size: input.size }
+              : { op: "delete" as const, path: input.path, ...(input.etag ? { etag: input.etag } : {}) }),
+          });
+          return { seq: recorded.seq, pending: false };
+        } catch (error) {
+          // R2 already holds the bytes; a journal failure may never turn that into a failed write. It
+          // is reported as pending, and the room retries the same commitId until the fact lands.
+          console.error(`hot mutation recording incomplete id=${input.id} op=${input.op} error=${error instanceof Error ? error.message.slice(0, 200) : "unknown"}`);
+          return { seq: -1, pending: true };
+        }
+      },
+    });
+  }
+
+  /** The effective remote state, plus the material a room is seeded with when it is asked for. */
+  async observeHotPath(input: { canonicalPath: string; withContent?: boolean }): Promise<HotPathObservation> {
+    if (!isHotObserveInput(input)) throw new TypeError("invalid observeHotPath input");
+    return this.hotCheckpoint().observe(input.canonicalPath, input.withContent === true);
+  }
+
+  async checkpointHotDocument(input: HotCheckpointInput): Promise<HotCheckpointResult> {
+    if (!isHotCheckpointInput(input)) return { status: "failed", reason: "invalid" };
+    const result = await this.hotCheckpoint().checkpoint(input);
+    if (result.status === "committed") this.ctx.waitUntil(this.drainConsumers(result.commitId));
+    return result;
+  }
+
+  async deleteHotDocument(input: HotDeleteInput): Promise<HotDeleteResult> {
+    if (!isHotDeleteInput(input)) return { status: "failed", reason: "invalid" };
+    const result = await this.hotCheckpoint().remove(input);
+    if (result.status === "deleted" && !result.alreadyDeleted) this.ctx.waitUntil(this.drainConsumers(input.commitId));
+    return result;
+  }
+
+  async moveHotDocument(input: HotMoveInput): Promise<HotMoveResult> {
+    if (!isHotMoveInput(input)) return { status: "failed", reason: "invalid" };
+    const result = await this.hotCheckpoint().move(input);
+    if (result.status === "moved") this.ctx.waitUntil(this.drainConsumers(input.commitId));
+    return result;
   }
 
   /**

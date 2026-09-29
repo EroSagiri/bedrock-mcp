@@ -6,10 +6,18 @@
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true, "traces": { "enabled": true } },
   "durable_objects": {
-    "bindings": [{ "name": "REMOTE_CHANGE_HUB", "class_name": "RemoteChangeHub" }]
+    "bindings": [
+      { "name": "REMOTE_CHANGE_HUB", "class_name": "RemoteChangeHub" },
+      // One coordinator per knowledge base (the channel) owns the path namespace; one room per
+      // DocumentId owns a document's CRDT state and its checkpoint schedule.
+      { "name": "COORDINATOR", "class_name": "NamespaceCoordinator" },
+      { "name": "ROOM", "class_name": "LiveDocumentRoom" }
+    ]
   },
   "exports": {
     "RemoteChangeHub": { "type": "durable-object", "storage": "sqlite" },
+    "NamespaceCoordinator": { "type": "durable-object", "storage": "sqlite" },
+    "LiveDocumentRoom": { "type": "durable-object", "storage": "sqlite" },
     "SyncGatewayEntrypoint": { "type": "worker" }
   },
   "services": [

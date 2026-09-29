@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import { createVaultClient } from "../apps/mcp/src/vault-client";
 import { createVaultService } from "../apps/vault/src/service";
 import { MemoryMutationStore } from "../apps/vault/src/index/memory-store";
@@ -327,3 +327,11 @@ describe("MCP-side repair against the real Vault RPC", () => {
     expect((await bindings().MINERAL.list({ prefix: key })).objects).toHaveLength(1);
   });
 });
+
+/**
+ * The repair paths leave deliveries and index drains running in `waitUntil`. They are the runtime's
+ * chains, not this file's, so a teardown that lands while one is in flight reports an
+ * `EnvironmentTeardownError` even though every assertion passed. This is test hygiene only.
+ */
+afterAll(async () => { await new Promise(resolve => setTimeout(resolve, 800)); });
+

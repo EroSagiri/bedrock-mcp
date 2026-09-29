@@ -8,9 +8,10 @@ import { isTextDocumentKey } from "@mineral/core/keys";
  * document that does not exist as far as search is concerned.
  *
  * `.history/` and `.trash/` are the vault's own bookkeeping — a backup of a note is not the note — and
- * `.system/` holds machine-written state, not knowledge.
+ * `.system/` holds machine-written state, not knowledge. `.mineral-sync/` is the sync layer's own
+ * namespace: tombstones and verification material live there, and none of it is knowledge.
  */
-const SYSTEM_PREFIXES = [".history/", ".trash/", ".system/"] as const;
+const SYSTEM_PREFIXES = [".history/", ".trash/", ".system/", ".mineral-sync/"] as const;
 
 export function isIndexable(key: string): boolean {
   return isTextDocumentKey(key) && !SYSTEM_PREFIXES.some(prefix => key.startsWith(prefix));

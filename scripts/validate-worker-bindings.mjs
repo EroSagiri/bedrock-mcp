@@ -57,6 +57,11 @@ check(vaultBinding?.entrypoint === undefined, "mcp: VAULT must bind the Vault's 
 // Durable Object bindings must name classes the same Worker actually exports.
 for (const [document, bindingName, className, label] of [
   [gateway, "REMOTE_CHANGE_HUB", "RemoteChangeHub", "gateway"],
+  // The hot layer is two objects with different owners: the namespace (per knowledge base) and the
+  // document (per DocumentId). Binding either to the wrong class is a runtime failure on the first
+  // real edit, which is exactly the kind of mistake this static check exists to catch.
+  [gateway, "COORDINATOR", "NamespaceCoordinator", "gateway"],
+  [gateway, "ROOM", "LiveDocumentRoom", "gateway"],
   [vault, "VAULT_INDEX", "VaultIndex", "vault"],
 ]) {
   const binding = (document.durable_objects?.bindings ?? []).find(entry => entry.name === bindingName);

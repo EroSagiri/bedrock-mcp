@@ -4,6 +4,8 @@
  * This deliberately excludes Cloudflare storage handles and Vault runtime
  * classes. The MCP side may depend only on these DTOs and operations.
  */
+import type { HotRemoteObservation } from "@mineral/sync-core/hot-protocol";
+
 export type VaultRpcDocumentMetadata = {
   key: string;
   size: number;
@@ -96,6 +98,119 @@ export type ListDocumentsResult = {
   objects: VaultRpcDocumentMetadata[];
   cursor: string | null;
   truncated: boolean;
+};
+
+/* ------------------------------------------------------------------------------------------------
+ * Hot checkpoint surface (Phase Hot-B)
+ *
+ * The Gateway's LiveDocumentRoom owns the CRDT and the checkpoint schedule; the Vault owns R2 and the
+ * journal. These four operations are the whole seam between them. Every one of them is a
+ * *conditional* R2 act: the caller states the revision it expects to be acting on, and a mismatch is
+ * answered as a conflict rather than resolved by whoever wrote last.
+ * ---------------------------------------------------------------------------------------------- */
+
+/** An observation plus, on request, the material the room is seeded with. */
+export type HotPathObservation = {
+  observation: HotRemoteObservation;
+  content?: string;
+};
+
+export type HotCheckpointInput = {
+  /** Vault-relative path; the Vault composes the configured remote prefix itself. */
+  canonicalPath: string;
+  documentId: string;
+  epoch: number;
+  documentRevision: number;
+  /** Both the journal idempotency key and the commit identity the object records. */
+  commitId: string;
+  contentHash: string;
+  markdown: string;
+  /** `null` means "this path must not exist yet", which is how a create stays a create. */
+  expectedRemoteETag: string | null;
+  /**
+   * `true` only for a room that was created *over a tombstoned revision* — the recreate case.
+   *
+   * The default is the safe one: a live tombstone on the revision a room is building on means the
+   * document was deleted while (or after) the room held it, and writing anyway would resurrect a file
+   * someone deliberately removed. A brand-new incarnation on a deleted path is the one case where
+   * replacing the retired revision is the intent, and it has to say so explicitly.
+   */
+  replaceTombstonedRevision: boolean;
+};
+
+export type HotCheckpointResult =
+  | {
+    status: "committed";
+    canonicalPath: string;
+    etag: string;
+    size: number;
+    contentHash: string;
+    commitId: string;
+    documentRevision: number;
+    mutationSeq: number;
+    mutationPending: boolean;
+    /** `true` when this call found its own earlier commit already in R2 after a lost response. */
+    recovered: boolean;
+  }
+  | { status: "conflict"; reason: "remote-changed" | "remote-deleted" | "already-exists"; observation: HotRemoteObservation }
+  | { status: "failed"; reason: "invalid" | "hash-mismatch" | "unavailable"; detail?: string };
+
+export type HotDeleteInput = {
+  canonicalPath: string;
+  documentId: string;
+  epoch: number;
+  commitId: string;
+  /** The exact revision this deletion intends to retire; `null` means "the path is already absent". */
+  expectedRemoteETag: string | null;
+};
+
+export type HotDeleteResult =
+  | {
+    status: "deleted";
+    canonicalPath: string;
+    retiredETag: string | null;
+    mutationSeq: number;
+    mutationPending: boolean;
+    /** `true` when the object was already gone or already tombstoned, so nothing was retired twice. */
+    alreadyDeleted: boolean;
+  }
+  | { status: "conflict"; reason: "remote-changed" | "remote-deleted"; observation: HotRemoteObservation }
+  | { status: "failed"; reason: "invalid" | "unavailable"; detail?: string };
+
+export type HotMoveInput = {
+  fromPath: string;
+  toPath: string;
+  documentId: string;
+  epoch: number;
+  documentRevision: number;
+  commitId: string;
+  contentHash: string;
+  markdown: string;
+  /** The revision the source must still hold for the move to be safe. */
+  expectedFromETag: string;
+};
+
+export type HotMoveResult =
+  | {
+    status: "moved";
+    fromPath: string;
+    toPath: string;
+    etag: string;
+    size: number;
+    contentHash: string;
+    retiredETag: string;
+    mutationSeq: number;
+    mutationPending: boolean;
+  }
+  | { status: "conflict"; reason: "remote-changed" | "remote-deleted" | "target-exists"; observation: HotRemoteObservation }
+  | { status: "failed"; reason: "invalid" | "hash-mismatch" | "unavailable"; detail?: string };
+
+/** The Vault, as the Gateway's LiveDocumentRoom needs it. */
+export type VaultHotRpc = {
+  observeHotPath(input: { canonicalPath: string; withContent?: boolean }): Promise<HotPathObservation>;
+  checkpointHotDocument(input: HotCheckpointInput): Promise<HotCheckpointResult>;
+  deleteHotDocument(input: HotDeleteInput): Promise<HotDeleteResult>;
+  moveHotDocument(input: HotMoveInput): Promise<HotMoveResult>;
 };
 
 export type VaultRpc = {

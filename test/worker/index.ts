@@ -1,7 +1,10 @@
 import { WorkerEntrypoint, exports } from "cloudflare:workers";
+import type { VaultHotRpc } from "@mineral/core/vault-rpc";
 import ProductionVaultEntrypoint from "../../apps/vault/src/entrypoint";
 import { VaultIndex as ProductionVaultIndex } from "../../apps/vault/src/durable/vault-index";
 import SyncGateway from "../../apps/sync-gateway/src/index";
+import { LiveDocumentRoom as ProductionLiveDocumentRoom } from "../../apps/sync-gateway/src/live-document-room";
+import { NamespaceCoordinator as ProductionNamespaceCoordinator } from "../../apps/sync-gateway/src/namespace-coordinator";
 import type { VaultWorkerEnv } from "../../apps/vault/src/entrypoint";
 import type { GatewayEnv } from "../../apps/sync-gateway/src/index";
 import type { VaultMutationBinding } from "../../apps/sync-gateway/src/mutations";
@@ -49,6 +52,70 @@ export class VaultEntrypoint extends ProductionVaultEntrypoint {
 
 export { RemoteChangeHub } from "../../apps/sync-gateway/src/remote-change-hub";
 export { SyncGatewayEntrypoint } from "../../apps/sync-gateway/src/index";
+
+/**
+ * The hot Durable Objects, with the Vault reached the way the deployed service binding would.
+ *
+ * A Durable Object's environment is its own, so the test worker's `VAULT` proxy below does not reach
+ * here. These two subclasses are the whole seam: production returns `env.VAULT`, and the test returns
+ * the same Vault entrypoint the runtime constructed for this deployment. Everything else — the CRDT,
+ * the SQLite state machine, the alarms, the conditional writes — stays production code.
+ */
+export class LiveDocumentRoom extends ProductionLiveDocumentRoom {
+  /**
+   * How many upcoming checkpoint calls should fail with a transport error.
+   *
+   * An R2 outage is the one failure a durability design has to survive rather than report, and it
+   * cannot be produced from the outside: the room holds the pending target, the retry schedule, and the
+   * receipt. This counter is the smallest possible seam — it changes *whether the call is made*, never
+   * what the room does with the answer.
+   */
+  private failingCheckpoints = 0;
+
+  failNextCheckpoints(count: number): void {
+    this.failingCheckpoints = Math.max(0, Math.floor(count));
+  }
+
+  protected override vault(): VaultHotRpc | undefined {
+    const real = (exports as unknown as { VaultEntrypoint: VaultHotRpc }).VaultEntrypoint;
+    if (this.failingCheckpoints <= 0) return real;
+    this.failingCheckpoints -= 1;
+    return {
+      observeHotPath: input => real.observeHotPath(input),
+      checkpointHotDocument: async () => { throw new Error("r2 unavailable (test)"); },
+      deleteHotDocument: input => real.deleteHotDocument(input),
+      moveHotDocument: input => real.moveHotDocument(input),
+    };
+  }
+}
+
+export class NamespaceCoordinator extends ProductionNamespaceCoordinator {
+  /**
+   * How many upcoming namespace *deletes* should fail with a transport error.
+   *
+   * The coordinator's phase machine writes a phase before the act it describes, so an exception thrown
+   * where the Vault call would be leaves exactly the state a crashed client leaves behind: an operation
+   * recorded mid-flight and its path quiescing. That state cannot be produced from the outside (the DO
+   * would have to be killed between two internal steps), and it is the state the resume alarm exists for.
+   */
+  private failingDeletes = 0;
+
+  failNextDeletes(count: number): void {
+    this.failingDeletes = Math.max(0, Math.floor(count));
+  }
+
+  protected override vault(): VaultHotRpc | undefined {
+    const real = (exports as unknown as { VaultEntrypoint: VaultHotRpc }).VaultEntrypoint;
+    if (this.failingDeletes <= 0) return real;
+    this.failingDeletes -= 1;
+    return {
+      observeHotPath: input => real.observeHotPath(input),
+      checkpointHotDocument: input => real.checkpointHotDocument(input),
+      deleteHotDocument: async () => { throw new Error("vault unavailable (test)"); },
+      moveHotDocument: input => real.moveHotDocument(input),
+    };
+  }
+}
 
 type TestEnv = VaultWorkerEnv & GatewayEnv;
 

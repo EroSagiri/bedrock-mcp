@@ -103,8 +103,15 @@ describe("mineral-sync-gateway", () => {
     expect((await SELF.fetch(`https://gateway.test/v1/channels/${channelC}/subscribe`, { headers: { Upgrade: "websocket" } })).status).toBe(401);
     expect((await subscribe("?ticket=")).status).toBe(401);
     expect((await subscribe("?ticket=short")).status).toBe(401);
-    // Flip one signature character, guaranteeing it actually differs.
-    const forged = `${ticket.slice(0, -1)}${ticket.endsWith("A") ? "B" : "A"}`;
+    // Tamper with four signature characters, not one.
+    //
+    // Unpadded base64url discards the low bits of its final character, so flipping that single
+    // character can decode to the *same* signature bytes — the HMAC then verifies and the socket opens.
+    // That made this assertion depend on the random signature's last character, which is exactly the
+    // kind of flake that only shows up under full-suite load.
+    const signature = ticket.split(".").at(-1) ?? "";
+    const forgedSignature = `${signature.slice(0, -4)}${signature.endsWith("AAAA") ? "BBBB" : "AAAA"}`;
+    const forged = [...ticket.split(".").slice(0, -1), forgedSignature].join(".");
     expect((await subscribe(`?ticket=${encodeURIComponent(forged)}`)).status).toBe(401);
     expect((await subscribe(`?ticket=${encodeURIComponent(`v1.${channelB}.${ticket.split(".").slice(2).join(".")}`)}`)).status).toBe(401);
     const channelBTicket = await request(`/v1/channels/${channelB}/ticket`, { method: "POST", body: "{}" });

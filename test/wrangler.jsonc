@@ -7,21 +7,35 @@
   "durable_objects": {
     "bindings": [
       { "name": "REMOTE_CHANGE_HUB", "class_name": "RemoteChangeHub" },
-      { "name": "VAULT_INDEX", "class_name": "VaultIndex" }
+      { "name": "VAULT_INDEX", "class_name": "VaultIndex" },
+      { "name": "COORDINATOR", "class_name": "NamespaceCoordinator" },
+      { "name": "ROOM", "class_name": "LiveDocumentRoom" }
     ]
   },
   "exports": {
     "RemoteChangeHub": { "type": "durable-object", "storage": "sqlite" },
-    "VaultIndex": { "type": "durable-object", "storage": "sqlite" }
+    "VaultIndex": { "type": "durable-object", "storage": "sqlite" },
+    "NamespaceCoordinator": { "type": "durable-object", "storage": "sqlite" },
+    "LiveDocumentRoom": { "type": "durable-object", "storage": "sqlite" }
   },
   "r2_buckets": [
     { "binding": "MINERAL", "bucket_name": "mineral-test" }
+  ],
+  "services": [
+    // The Vault's Sync Publisher, pointed back at this same worker's Gateway entrypoint.
+    //
+    // Without it every mutation stays pending forever and each drain logs two lines about a delivery
+    // that can never happen — noise that also races the test teardown. With it, the journal → publisher
+    // → RemoteChangeHub path is exercised for real by every write, which is what an integration suite
+    // is for.
+    { "binding": "SYNC_GATEWAY", "service": "mineral-integration-test", "entrypoint": "SyncGatewayEntrypoint" }
   ],
   "vars": {
     "SYNC_GATEWAY_TOKEN": "gateway-test-token",
     "MUTATION_INGRESS_TOKEN": "ingress-test-token",
     "INDEXING_ENABLED": "true",
-    "MINERAL_R2_ENDPOINT": "https://example.r2.cloudflarestorage.com",
+    // A real-shaped endpoint, so the Vault derives a channel and the publisher has somewhere to publish.
+    "MINERAL_R2_ENDPOINT": "https://account.r2.cloudflarestorage.com",
     "MINERAL_BUCKET": "mineral",
     "MINERAL_REMOTE_PREFIX": ""
   }
