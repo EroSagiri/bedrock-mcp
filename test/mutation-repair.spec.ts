@@ -333,5 +333,7 @@ describe("MCP-side repair against the real Vault RPC", () => {
  * chains, not this file's, so a teardown that lands while one is in flight reports an
  * `EnvironmentTeardownError` even though every assertion passed. This is test hygiene only.
  */
-afterAll(async () => { await new Promise(resolve => setTimeout(resolve, 800)); });
+afterAll(async () => {
+  await (vaultEntrypoint() as unknown as { drainBackgroundTasks(): Promise<void> }).drainBackgroundTasks();
+});
 

@@ -121,6 +121,13 @@ function toRpcMetadata(metadata: VaultDocumentMetadata): VaultRpcDocumentMetadat
  */
 export default class VaultEntrypoint extends WorkerEntrypoint<VaultWorkerEnv> {
   /**
+   * Owns post-response work for the runtime and gives the Workers test subclass one deterministic
+   * observation point. Production still delegates lifetime to ExecutionContext.waitUntil.
+   */
+  protected runInBackground(work: Promise<unknown>): void {
+    this.ctx.waitUntil(work);
+  }
+  /**
    * The one seam that exists for tests: a subclass may supply the journal, so a test can produce the
    * "R2 committed, journal did not" state without pretending the deployed binding is broken.
    */
@@ -152,7 +159,7 @@ export default class VaultEntrypoint extends WorkerEntrypoint<VaultWorkerEnv> {
     const ingress = createMutationIngress(this.env, journal, service.mutations);
     try {
       const result = await ingress.record(event);
-      this.ctx.waitUntil(this.drainConsumers(event.id));
+      this.runInBackground(this.drainConsumers(event.id));
       return { verdict: result.status, seq: result.seq };
     } catch (error) {
       if (error instanceof MutationIngressError) return { verdict: "refused", reason: "state-mismatch" };
@@ -207,21 +214,21 @@ export default class VaultEntrypoint extends WorkerEntrypoint<VaultWorkerEnv> {
   async checkpointHotDocument(input: HotCheckpointInput): Promise<HotCheckpointResult> {
     if (!isHotCheckpointInput(input)) return { status: "failed", reason: "invalid" };
     const result = await this.hotCheckpoint().checkpoint(input);
-    if (result.status === "committed") this.ctx.waitUntil(this.drainConsumers(result.commitId));
+    if (result.status === "committed") this.runInBackground(this.drainConsumers(result.commitId));
     return result;
   }
 
   async deleteHotDocument(input: HotDeleteInput): Promise<HotDeleteResult> {
     if (!isHotDeleteInput(input)) return { status: "failed", reason: "invalid" };
     const result = await this.hotCheckpoint().remove(input);
-    if (result.status === "deleted" && !result.alreadyDeleted) this.ctx.waitUntil(this.drainConsumers(input.commitId));
+    if (result.status === "deleted" && !result.alreadyDeleted) this.runInBackground(this.drainConsumers(input.commitId));
     return result;
   }
 
   async moveHotDocument(input: HotMoveInput): Promise<HotMoveResult> {
     if (!isHotMoveInput(input)) return { status: "failed", reason: "invalid" };
     const result = await this.hotCheckpoint().move(input);
-    if (result.status === "moved") this.ctx.waitUntil(this.drainConsumers(input.commitId));
+    if (result.status === "moved") this.runInBackground(this.drainConsumers(input.commitId));
     return result;
   }
 
@@ -275,14 +282,14 @@ export default class VaultEntrypoint extends WorkerEntrypoint<VaultWorkerEnv> {
 
   async putDocument(input: PutDocumentInput): Promise<PutDocumentResult> {
     const document = await this.service().documents.put(input, { source: "mcp" });
-    this.ctx.waitUntil(this.afterWrite(document, { op: "put", path: document.key, etag: document.etag, size: document.size }));
+    this.runInBackground(this.afterWrite(document, { op: "put", path: document.key, etag: document.etag, size: document.size }));
     return { etag: document.etag, size: document.size, mutationId: document.mutationId, mutationSeq: document.mutationSeq, mutationPending: document.mutationPending };
   }
 
   async deleteDocuments(keys: string | string[]): Promise<DeleteDocumentsResult> {
     const results = await this.service().documents.delete(keys, { source: "mcp" });
     const list = Array.isArray(results) ? results : [results];
-    for (const result of list) this.ctx.waitUntil(this.afterWrite(result, { op: "delete", path: result.key, etag: result.etag }));
+    for (const result of list) this.runInBackground(this.afterWrite(result, { op: "delete", path: result.key, etag: result.etag }));
     return {
       deleted: list.map(result => result.key),
       etags: list.map(result => result.etag ?? null),
@@ -297,7 +304,7 @@ export default class VaultEntrypoint extends WorkerEntrypoint<VaultWorkerEnv> {
 
   async moveDocument(from: string, to: string): Promise<void> {
     await this.service().documents.move(from, to, { source: "mcp" });
-    this.ctx.waitUntil(this.drainConsumers());
+    this.runInBackground(this.drainConsumers());
   }
 
   async queryIndex(kind: string, input: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -369,7 +376,7 @@ export default class VaultEntrypoint extends WorkerEntrypoint<VaultWorkerEnv> {
    * delays the low-latency path.
    */
   async scheduled(controller: ScheduledController): Promise<void> {
-    this.ctx.waitUntil(this.scheduledWork(controller.cron));
+    this.runInBackground(this.scheduledWork(controller.cron));
   }
 
   private async scheduledWork(cron: string | undefined): Promise<void> {
@@ -440,7 +447,7 @@ export default class VaultEntrypoint extends WorkerEntrypoint<VaultWorkerEnv> {
     const event = parseCommittedMutation(input);
     if (!event) return { recorded: false, attempts: 0 };
     const repair = await this.repair(this.journal(), this.service().mutations, event);
-    if (repair.recorded) this.ctx.waitUntil(this.drainConsumers(repair.seq === undefined ? event.id : undefined));
+    if (repair.recorded) this.runInBackground(this.drainConsumers(repair.seq === undefined ? event.id : undefined));
     return repair;
   }
 
@@ -577,8 +584,7 @@ export default class VaultEntrypoint extends WorkerEntrypoint<VaultWorkerEnv> {
     // A reported fact owes the same follow-through as a Vault-performed write: broadcast and index it.
     // The drain runs after the response, so the caller's 202 still means "durable", not "delivered" —
     // and an ingress report does not sit in the journal until the next cron tick.
-    if (outcome.recorded) this.ctx.waitUntil(this.drainConsumers(outcome.mutationId));
+    if (outcome.recorded) this.runInBackground(this.drainConsumers(outcome.mutationId));
     return outcome.response;
   }
 }
-

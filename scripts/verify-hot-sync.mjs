@@ -10,22 +10,30 @@
 // anyone's vault or search results. No secrets are printed.
 //
 // Usage: node scripts/verify-hot-sync.mjs <gatewayBaseUrl> <tokenFile> <identityFile>
+//    or: node scripts/verify-hot-sync.mjs --plugin-data <pluginDataJson>
 //   identityFile: { "endpoint": "...", "bucket": "...", "remotePrefix": "" }
 
 import { readFileSync } from "node:fs";
 import * as Y from "yjs";
 import { deriveRemoteChangeChannel } from "../packages/sync-core/dist/channel.js";
 
-const base = process.argv[2];
-const tokenFile = process.argv[3];
-const identityFile = process.argv[4];
-if (!base || !tokenFile || !identityFile) {
+const pluginDataPath = process.argv[2] === "--plugin-data" ? process.argv[3] : undefined;
+const pluginData = pluginDataPath ? JSON.parse(readFileSync(pluginDataPath, "utf8")) : undefined;
+const base = pluginData?.gatewayEndpoint ?? process.argv[2];
+const tokenFile = pluginData ? undefined : process.argv[3];
+const identityFile = pluginData ? undefined : process.argv[4];
+if (!base || (!pluginData && (!tokenFile || !identityFile))) {
   console.error("usage: node scripts/verify-hot-sync.mjs <gatewayBaseUrl> <tokenFile> <identityFile>");
+  console.error("   or: node scripts/verify-hot-sync.mjs --plugin-data <pluginDataJson>");
   process.exit(2);
 }
 
-const token = readFileSync(tokenFile, "utf8").trim();
-const identity = JSON.parse(readFileSync(identityFile, "utf8"));
+const token = pluginData?.gatewayToken ?? readFileSync(tokenFile, "utf8").trim();
+const identity = pluginData ?? JSON.parse(readFileSync(identityFile, "utf8"));
+if (typeof token !== "string" || token.length === 0 || typeof identity.endpoint !== "string" || typeof identity.bucket !== "string") {
+  console.error("plugin data or identity file is missing gatewayToken, endpoint, or bucket");
+  process.exit(2);
+}
 const channel = await deriveRemoteChangeChannel({ endpoint: identity.endpoint, bucket: identity.bucket, remotePrefix: identity.remotePrefix ?? "" });
 const auth = { Authorization: `Bearer ${token}` };
 const runId = `r${Date.now().toString(36)}`;
@@ -325,4 +333,3 @@ async function main() {
 }
 
 await main();
-

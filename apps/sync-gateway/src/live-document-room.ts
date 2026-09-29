@@ -392,10 +392,16 @@ export class LiveDocumentRoom extends DurableObject<GatewayHotEnv> {
     const room = this.room;
     if (!room) return { ok: false, reason: "unknown-document", conflicted: false };
     if (room.epoch !== input.expectedEpoch) return { ok: false, reason: "stale-epoch", conflicted: false };
-    if (room.state !== "active") return { ok: false, reason: "checkpoint-conflict", conflicted: true };
+    if (room.state !== "active" && room.state !== "quiescing") return { ok: false, reason: "checkpoint-conflict", conflicted: true };
 
-    room.state = "quiescing";
-    this.persist();
+    // Namespace operations are resumed with the same operation/commit id after an ambiguous service
+    // binding failure.  In that case the first attempt has already fenced the room.  Treating the
+    // durable `quiescing` state as a new conflict makes the retry impossible and leaves the path
+    // permanently fenced, so re-entry must return the same settled checkpoint payload.
+    if (room.state === "active") {
+      room.state = "quiescing";
+      this.persist();
+    }
     // A room with nothing outstanding has nothing to save, and that is a success, not a failure: it
     // already holds a checkpoint for exactly the revision a namespace transition needs to build on.
     const pending = room.latestAcceptedRevision > room.latestCheckpointedRevision || room.pendingTarget !== null;
@@ -1185,5 +1191,4 @@ function parseTarget(value: unknown): RoomCheckpointTarget | null {
     return null;
   }
 }
-
 

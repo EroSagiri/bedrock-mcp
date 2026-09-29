@@ -29,6 +29,7 @@ import { createFakeVectorize } from "../fake-vectorize";
  * These are the only two overrides in the test worker, and production has no equivalent of either.
  */
 const fakeAi = createFakeAi();
+const vaultBackgroundTasks = new Set<Promise<unknown>>();
 
 export class VaultIndex extends ProductionVaultIndex {
   private readonly fakeVectorize = createFakeVectorize();
@@ -48,6 +49,21 @@ export class VaultIndex extends ProductionVaultIndex {
 
 export class VaultEntrypoint extends ProductionVaultEntrypoint {
   protected override embeddings() { return fakeAi; }
+
+  protected override runInBackground(work: Promise<unknown>): void {
+    let tracked: Promise<unknown>;
+    // WorkerEntrypoint RPC calls may be served by different class instances in the same isolate. The
+    // tracker therefore belongs to the test isolate, not one entrypoint object, so teardown can see
+    // every production waitUntil chain started by earlier RPC calls.
+    tracked = work.finally(() => vaultBackgroundTasks.delete(tracked));
+    vaultBackgroundTasks.add(tracked);
+    super.runInBackground(tracked);
+  }
+
+  /** Waits for the production waitUntil chains without a wall-clock sleep at test teardown. */
+  async drainBackgroundTasks(): Promise<void> {
+    while (vaultBackgroundTasks.size > 0) await Promise.allSettled([...vaultBackgroundTasks]);
+  }
 }
 
 export { RemoteChangeHub } from "../../apps/sync-gateway/src/remote-change-hub";
@@ -99,20 +115,44 @@ export class NamespaceCoordinator extends ProductionNamespaceCoordinator {
    * would have to be killed between two internal steps), and it is the state the resume alarm exists for.
    */
   private failingDeletes = 0;
+  private failingMoves = 0;
+  private lostMoveResponses = 0;
 
   failNextDeletes(count: number): void {
     this.failingDeletes = Math.max(0, Math.floor(count));
   }
 
+  failNextMoves(count: number): void {
+    this.failingMoves = Math.max(0, Math.floor(count));
+  }
+
+  loseNextMoveResponses(count: number): void {
+    this.lostMoveResponses = Math.max(0, Math.floor(count));
+  }
+
   protected override vault(): VaultHotRpc | undefined {
     const real = (exports as unknown as { VaultEntrypoint: VaultHotRpc }).VaultEntrypoint;
-    if (this.failingDeletes <= 0) return real;
-    this.failingDeletes -= 1;
+    if (this.failingDeletes <= 0 && this.failingMoves <= 0 && this.lostMoveResponses <= 0) return real;
     return {
       observeHotPath: input => real.observeHotPath(input),
       checkpointHotDocument: input => real.checkpointHotDocument(input),
-      deleteHotDocument: async () => { throw new Error("vault unavailable (test)"); },
-      moveHotDocument: input => real.moveHotDocument(input),
+      deleteHotDocument: input => {
+        if (this.failingDeletes <= 0) return real.deleteHotDocument(input);
+        this.failingDeletes -= 1;
+        throw new Error("vault unavailable (test)");
+      },
+      moveHotDocument: async input => {
+        if (this.failingMoves > 0) {
+          this.failingMoves -= 1;
+          throw new Error("vault unavailable (test)");
+        }
+        const result = await real.moveHotDocument(input);
+        if (this.lostMoveResponses > 0) {
+          this.lostMoveResponses -= 1;
+          throw new Error("vault response lost after commit (test)");
+        }
+        return result;
+      },
     };
   }
 }

@@ -853,16 +853,15 @@ export class NamespaceCoordinator extends DurableObject<GatewayNamespaceEnv> {
         fromPath: null,
         outcome: "rejected",
         reason: "unavailable",
-        phase: "r2-applied",
+        // The checkpoint is durable, but an RPC exception cannot prove whether the R2 mutation ran.
+        // Retrying from `checkpointed` is safe because the Vault deduplicates by commitId.
+        phase: "checkpointed",
         binding: current ? this.toBinding(current) : binding,
       });
-      // The durable phase deliberately stays at `r2-applied` (not `failed`): the room's alarm retries
-      // any phase outside the terminal pair, so a transient RPC blip becomes another attempt on the
-      // next tick rather than a path the alarm has given up on. The typed outcome is what the *current*
-      // caller sees; a future caller asking with the same operation id reads the durable phase and the
-      // alarm retries it until success or until MAX_NAMESPACE_RESUME_ATTEMPTS forces an explicit
-      // release.
-      this.recordOperation(intent, "r2-applied", result);
+      // The durable phase stays at `checkpointed` (not `failed`): the room was quiesced, but the thrown
+      // RPC cannot prove whether R2 committed. The alarm retries the same commitId until the Vault can
+      // answer definitively or MAX_NAMESPACE_RESUME_ATTEMPTS forces an explicit release.
+      this.recordOperation(intent, "checkpointed", result);
       // The binding stays `quiescing`: this is the seam a client that walked away leaves behind. The
       // alarm retries the operation a bounded number of times and then calls `releaseQuiescingBinding`
       // explicitly, so a transient RPC blip is recovered by the durable object's own clock rather than
@@ -929,12 +928,19 @@ export class NamespaceCoordinator extends DurableObject<GatewayNamespaceEnv> {
     const room = this.room(intent.documentId);
     if (!vault || !room) return this.outcome({ intent, path: toPath, fromPath, outcome: "rejected", reason: "unavailable", phase: "requested", binding: targetBinding, fromBinding });
 
-    const observation = await this.observe(toPath, false);
-    if (!observation) return this.outcome({ intent, path: toPath, fromPath, outcome: "rejected", reason: "unavailable", phase: "requested", binding: targetBinding, fromBinding });
-    if (observation.observation.exists) {
-      const result = this.outcome({ intent, path: toPath, fromPath, outcome: "conflict", reason: "target-exists", phase: "failed", binding: observation.observation ? targetBinding : null, fromBinding });
-      this.recordOperation(intent, "failed", result);
-      return result;
+    const phase = this.operation(intent.operationId)?.phase ?? "requested";
+    // Before checkpointing, target existence is a genuine precondition. Afterwards it may be the
+    // result of our own move whose service-binding response was lost. Replaying the same commit id is
+    // the authority that distinguishes those cases; observing first would turn a committed rename
+    // into a false `target-exists` conflict.
+    if (phase === "requested" || phase === "quiescing") {
+      const observation = await this.observe(toPath, false);
+      if (!observation) return this.outcome({ intent, path: toPath, fromPath, outcome: "rejected", reason: "unavailable", phase: "requested", binding: targetBinding, fromBinding });
+      if (observation.observation.exists) {
+        const result = this.outcome({ intent, path: toPath, fromPath, outcome: "conflict", reason: "target-exists", phase: "failed", binding: observation.observation ? targetBinding : null, fromBinding });
+        this.recordOperation(intent, "failed", result);
+        return result;
+      }
     }
 
     this.recordOperation(intent, "quiescing", null);
@@ -987,13 +993,13 @@ export class NamespaceCoordinator extends DurableObject<GatewayNamespaceEnv> {
         fromPath,
         outcome: "rejected",
         reason: "unavailable",
-        phase: "r2-applied",
+        phase: "checkpointed",
         binding: current ? this.toBinding(current) : fromBinding,
         fromBinding: current ? this.toBinding(current) : fromBinding,
       });
-      // The durable phase stays at `r2-applied` (not `failed`); see `delete` for the rationale. The
+      // The durable phase stays at `checkpointed` (not `failed`); see `delete` for the rationale. The
       // alarm retries until success or `MAX_NAMESPACE_RESUME_ATTEMPTS` forces a release.
-      this.recordOperation(intent, "r2-applied", result);
+      this.recordOperation(intent, "checkpointed", result);
       // Same contract as `delete`: the source path stays `quiescing` until the alarm either retries
       // successfully or exhausts attempts and explicitly releases the binding. An immediate resume
       // would race the next retry and could fence the path in a state the durable record does not
@@ -1236,5 +1242,3 @@ function sameIntent(left: NamespaceIntent, right: NamespaceIntent): boolean {
 function emptyContentHash(): string {
   return "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 }
-
-

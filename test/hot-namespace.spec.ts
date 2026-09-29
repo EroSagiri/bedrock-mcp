@@ -573,7 +573,11 @@ describe("hot conflict resolution", () => {
 describe("namespace operations finish without their client", () => {
   /** The knowledge base's coordinator, with the test deployment's failure seam. */
   function coordinatorStub() {
-    return bindings().COORDINATOR.getByName(channel) as unknown as DurableObjectStub & { failNextDeletes(count: number): Promise<void> };
+    return bindings().COORDINATOR.getByName(channel) as unknown as DurableObjectStub & {
+      failNextDeletes(count: number): Promise<void>;
+      failNextMoves(count: number): Promise<void>;
+      loseNextMoveResponses(count: number): Promise<void>;
+    };
   }
 
   it("resumes a delete its client walked away from", async () => {
@@ -587,7 +591,8 @@ describe("namespace operations finish without their client", () => {
     await coordinator.failNextDeletes(1);
     // The route surfaces the failure as an error response (or, in this pool, a rejected fetch); either
     // way the client learns nothing and the record is what remains.
-    await namespace({ type: "delete", operationId: "resume-delete-1", clientId: "client-a", canonicalPath: path, documentId: identity.documentId, expectedEpoch: identity.epoch, expectedRemoteETag: null, expectedDocumentRevision: null }).catch(() => undefined);
+    const interrupted = await namespace({ type: "delete", operationId: "resume-delete-1", clientId: "client-a", canonicalPath: path, documentId: identity.documentId, expectedEpoch: identity.epoch, expectedRemoteETag: null, expectedDocumentRevision: null });
+    expect(interrupted.result).toMatchObject({ outcome: "rejected", reason: "unavailable", phase: "checkpointed" });
     expect((await pathStatus(path)).binding?.state, "the path is left mid-operation").toBe("quiescing");
 
     // The object's own alarm finishes what the client could not.
@@ -609,7 +614,8 @@ describe("namespace operations finish without their client", () => {
     // The Vault stays broken, so every resume attempt fails until the attempts run out.
     const coordinator = coordinatorStub();
     await coordinator.failNextDeletes(100);
-    await namespace({ type: "delete", operationId: "resume-delete-2", clientId: "client-b", canonicalPath: path, documentId: identity.documentId, expectedEpoch: identity.epoch, expectedRemoteETag: null, expectedDocumentRevision: null }).catch(() => undefined);
+    const interrupted = await namespace({ type: "delete", operationId: "resume-delete-2", clientId: "client-b", canonicalPath: path, documentId: identity.documentId, expectedEpoch: identity.epoch, expectedRemoteETag: null, expectedDocumentRevision: null });
+    expect(interrupted.result).toMatchObject({ outcome: "rejected", reason: "unavailable", phase: "checkpointed" });
     expect((await pathStatus(path)).binding?.state).toBe("quiescing");
 
     const released = await waitFor(async () => {
@@ -623,6 +629,65 @@ describe("namespace operations finish without their client", () => {
     expect((await pathStatus(path)).binding?.state).toBe("active");
     const retry = await namespace({ type: "delete", operationId: "resume-delete-2", clientId: "client-b", canonicalPath: path, documentId: identity.documentId, expectedEpoch: identity.epoch, expectedRemoteETag: null, expectedDocumentRevision: null }).catch(() => undefined);
     expect(retry === undefined || ["rejected", "conflict"].includes(retry.result.outcome), "a retry must produce a definite failure, not pending").toBe(true);
+  });
+
+  it("returns a typed rename failure and resumes the same commit from the checkpointed phase", async () => {
+    const fromPath = "notes/ns-resume-rename.md";
+    const toPath = "notes/ns-resume-renamed.md";
+    const { identity, session } = await hotPathWithContent(fromPath, "client-c", "rename survives rpc loss");
+    session.socket.close();
+
+    const coordinator = coordinatorStub();
+    await coordinator.failNextMoves(1);
+    const interrupted = await namespace({
+      type: "rename",
+      operationId: "resume-rename-1",
+      clientId: "client-c",
+      fromPath,
+      toPath,
+      documentId: identity.documentId,
+      expectedEpoch: identity.epoch,
+      expectedFromBinding: { documentId: identity.documentId, epoch: identity.epoch },
+      expectedToPathState: { state: "absent" },
+    });
+    expect(interrupted.result).toMatchObject({ outcome: "rejected", reason: "unavailable", phase: "checkpointed" });
+    expect((await pathStatus(fromPath)).binding?.state).toBe("quiescing");
+
+    const resumed = await waitFor(async () => {
+      await runDurableObjectAlarm(coordinator);
+      return (await pathStatus(toPath)).binding?.state === "active";
+    }, 12);
+    expect(resumed, "the resume alarm must complete the rename").toBe(true);
+    expect((await pathStatus(fromPath)).binding?.state).toBe("deleted");
+  });
+
+  it("recovers a rename committed by the Vault when only its response was lost", async () => {
+    const fromPath = "notes/ns-lost-rename-response.md";
+    const toPath = "notes/ns-lost-rename-response-recovered.md";
+    const { identity, session } = await hotPathWithContent(fromPath, "client-d", "committed before response loss");
+    session.socket.close();
+
+    const coordinator = coordinatorStub();
+    await coordinator.loseNextMoveResponses(1);
+    const interrupted = await namespace({
+      type: "rename",
+      operationId: "resume-rename-lost-response-1",
+      clientId: "client-d",
+      fromPath,
+      toPath,
+      documentId: identity.documentId,
+      expectedEpoch: identity.epoch,
+      expectedFromBinding: { documentId: identity.documentId, epoch: identity.epoch },
+      expectedToPathState: { state: "absent" },
+    });
+    expect(interrupted.result).toMatchObject({ outcome: "rejected", reason: "unavailable", phase: "checkpointed" });
+
+    const resumed = await waitFor(async () => {
+      await runDurableObjectAlarm(coordinator);
+      return (await pathStatus(toPath)).binding?.state === "active";
+    }, 12);
+    expect(resumed, "the same commit id must recover its receipt instead of reporting target-exists").toBe(true);
+    expect((await pathStatus(fromPath)).binding?.state).toBe("deleted");
   });
 });
 
@@ -658,8 +723,6 @@ describe("path observation", () => {
  * behaviour: nothing in the assertions below depends on it.
  */
 afterAll(async () => { await new Promise(resolve => setTimeout(resolve, 400)); });
-
-
 
 
 
