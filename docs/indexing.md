@@ -233,3 +233,20 @@ drain 的批量刻意小：每次请求 4 篇，审计每页 8 篇、结尾 32 �
 - 审计可恢复：`startIndexAudit` 会报告已在运行的那一次，游标接着走。
 
 `vault_index_refresh` 是触发它的唯一入口，也是索引落后的唯一修复路径 —— 检索不承担修复职责。
+
+---
+
+## 4. 冷同步删除索引
+
+Obsidian 的普通全量冷同步不再通过 R2 `LIST tombstones + 每条 GET` 来发现删除。Vault 从同一份追加式
+`mutation_journal` 派生“每个路径在某个 `snapshotSeq` 时的最后一次 mutation”；最后一次是带 ETag 的
+`delete` 才进入结果。后续 `put` 会自然覆盖旧删除，因此这里没有第二张可漂移的删除状态表。
+
+Gateway 只做认证和转发：`GET /v1/channels/{channel}/deletions` 通过 service binding 请求 Vault，既不读
+R2，也不保存删除状态。第一页固定 `snapshotSeq`，后续页携带同一快照和最后一个 path 游标，所以分页
+期间新写入不会造成漏项或重复项。页面最多 500 条；客户端默认每页 200 条。
+
+完整 tombstone 列举仍保留，但职责收窄为后台完整性检查和兼容回退：Gateway 不可用时冷同步仍可退回
+R2 审计。历史 tombstone 的自动压缩也只在该完整性检查之后运行，并且只移除已被 R2 中不同或更晚的
+活版本明确取代的旧 metadata；当前删除记录、其隐藏正文以及对象已不存在时仅剩的删除证据都不回收。
+没有全设备确认协议时，按天数删除当前 tombstone 或正文不具备可证明的安全性。

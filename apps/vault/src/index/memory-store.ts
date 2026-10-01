@@ -1,6 +1,7 @@
 import { applyIntent, type IndexAction, type IndexIntent, type IndexIntentSpec } from "./intents";
 import type { DueIndexIntent, IndexClaim, MutationStore, PendingIndexSummary, RecordMutationResult } from "../mutation/store";
 import type { BroadcastState, JournalEntry, MutationEvent, MutationSource } from "../mutation/types";
+import { DELETION_INDEX_PROTOCOL, type DeletionIndexPage } from "@mineral/sync-core/deletion-index";
 
 type MemoryEntry = {
   seq: number;
@@ -138,6 +139,25 @@ export class MemoryMutationStore implements MutationStore {
     if (!intent || intent.action !== input.action || intent.targetEtag !== input.etag) return;
     intent.lastError = input.error.slice(0, 200);
     intent.notBefore = Math.max(intent.notBefore, input.notBefore);
+  }
+
+  listDeletionIndex(input: { snapshotSeq?: string; cursor?: string; limit: number }): DeletionIndexPage {
+    const snapshot = input.snapshotSeq === undefined ? this.sequence : Number(input.snapshotSeq);
+    if (!Number.isSafeInteger(snapshot) || snapshot < 0 || snapshot > this.sequence) throw new TypeError("invalid deletion snapshot");
+    const latest = new Map<string, MemoryEntry>();
+    for (const entry of this.entries) {
+      if (entry.seq > snapshot) continue;
+      if (entry.event.op === "rename") {
+        latest.set(entry.event.from, { ...entry, event: { ...entry.event, op: "delete", path: entry.event.from } });
+        latest.set(entry.event.path, entry);
+      } else latest.set(entry.event.path, entry);
+    }
+    const limit = Math.min(500, Math.max(1, Math.floor(input.limit)));
+    const all = [...latest.entries()]
+      .filter(([path, entry]) => path > (input.cursor ?? "") && entry.event.op === "delete" && Boolean(entry.event.etag))
+      .sort(([left], [right]) => left.localeCompare(right));
+    const entries = all.slice(0, limit).map(([path, entry]) => ({ path, deletedRemoteETag: entry.event.etag!, committedAt: entry.event.committedAt, mutationSeq: entry.seq }));
+    return { protocol: DELETION_INDEX_PROTOCOL, snapshotSeq: String(snapshot), entries, ...(all.length > limit && entries.length ? { nextCursor: entries[entries.length - 1].path } : {}) };
   }
 
   /** Test-only inspection: the current materialised dirty set. */

@@ -1,6 +1,7 @@
 import { applyIntent, type IndexAction, type IndexIntent, type IndexIntentSpec } from "./intents";
 import type { DueIndexIntent, IndexClaim, MutationStore, PendingIndexSummary, RecordMutationResult } from "../mutation/store";
 import { isMutationSource, type BroadcastState, type JournalEntry, type MutationEvent, type MutationRecord, type MutationSource } from "../mutation/types";
+import { DELETION_INDEX_PROTOCOL, type DeletionIndexPage, type IndexedDeletion } from "@mineral/sync-core/deletion-index";
 
 /**
  * The narrowest slice of Cloudflare's Durable Object SQLite surface this module needs. Keeping the
@@ -36,6 +37,7 @@ export const MUTATION_SCHEMA = `
     created_at INTEGER NOT NULL
   );
   CREATE INDEX IF NOT EXISTS mutation_journal_broadcast ON mutation_journal(broadcast_state, seq);
+  CREATE INDEX IF NOT EXISTS mutation_journal_path_seq ON mutation_journal(path, seq DESC);
   CREATE TABLE IF NOT EXISTS pending_index (
     path TEXT PRIMARY KEY,
     action TEXT NOT NULL,
@@ -294,6 +296,44 @@ export class SqlMutationStore implements MutationStore {
    */
   record(event: MutationEvent, intents: IndexIntentSpec[]): RecordMutationResult {
     return this.recordWithinTransaction(event, intents);
+  }
+
+  /**
+   * Latest deletion per path in a stable journal snapshot.
+   *
+   * A later put removes a path from the result by winning `ROW_NUMBER`; a later delete replaces the
+   * older one. The extra row is only a pagination sentinel, so every page is bounded and no caller
+   * ever has to fetch tombstone bodies to discover the current deletion set.
+   */
+  listDeletionIndex(input: { snapshotSeq?: string; cursor?: string; limit: number }): DeletionIndexPage {
+    const current = this.first<{ seq: number | null }>("SELECT MAX(seq) seq FROM mutation_journal")?.seq ?? 0;
+    const requested = input.snapshotSeq === undefined ? current : Number(input.snapshotSeq);
+    if (!Number.isSafeInteger(requested) || requested < 0 || requested > current) throw new TypeError("invalid deletion snapshot");
+    const limit = Math.min(500, Math.max(1, Math.floor(input.limit)));
+    const rows = [...this.db.exec<{ path: string; etag: string; committed_at: number; seq: number }>(
+      `WITH path_events AS (
+         SELECT seq, path, op, etag, committed_at FROM mutation_journal WHERE seq <= ?
+         UNION ALL
+         SELECT seq, from_path path, 'delete' op, NULL etag, committed_at
+           FROM mutation_journal WHERE seq <= ? AND op = 'rename' AND from_path IS NOT NULL
+       ), latest AS (
+         SELECT path, op, etag, committed_at, seq,
+                ROW_NUMBER() OVER (PARTITION BY path ORDER BY seq DESC) rank
+           FROM path_events
+       )
+       SELECT path, etag, committed_at, seq FROM latest
+        WHERE rank = 1 AND op = 'delete' AND etag IS NOT NULL AND path > ?
+        ORDER BY path LIMIT ?`,
+      requested, requested, input.cursor ?? "", limit + 1,
+    )];
+    const page = rows.slice(0, limit);
+    const entries: IndexedDeletion[] = page.map(row => ({ path: row.path, deletedRemoteETag: row.etag, committedAt: row.committed_at, mutationSeq: row.seq }));
+    return {
+      protocol: DELETION_INDEX_PROTOCOL,
+      snapshotSeq: String(requested),
+      entries,
+      ...(rows.length > limit && page.length ? { nextCursor: page[page.length - 1].path } : {}),
+    };
   }
 }
 

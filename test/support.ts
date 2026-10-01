@@ -92,6 +92,7 @@ export function failingJournal(message = "journal unavailable") {
     claimPendingIndex: input => real.claimPendingIndex(input),
     completeIndex: input => real.completeIndex(input),
     failIndex: input => real.failIndex(input),
+    listDeletionIndex: input => real.listDeletionIndex(input),
   };
   return { journal, heal: () => { broken = false; } };
 }

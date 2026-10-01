@@ -1,5 +1,6 @@
 import type { IndexIntent, IndexIntentSpec, IndexAction } from "../index/intents";
 import type { JournalEntry, MutationEvent } from "./types";
+import type { DeletionIndexPage } from "@mineral/sync-core/deletion-index";
 
 /**
  * The persistence port for the Mutation Journal and the materialised index dirty set.
@@ -49,6 +50,7 @@ export type MutationStore = {
   completeIndex(input: { path: string; etag: string | null; action: IndexAction }): boolean;
   /** Records a failure and defers the intent until `notBefore`. Never touches a superseded row. */
   failIndex(input: { path: string; etag: string | null; action: IndexAction; error: string; notBefore: number }): void;
+  listDeletionIndex(input: { snapshotSeq?: string; cursor?: string; limit: number }): DeletionIndexPage;
 };
 
 /**
@@ -69,6 +71,7 @@ export type MutationJournal = {
   claimPendingIndex(input: { path: string; etag: string | null; action: IndexAction; now: number }): Promise<IndexClaim>;
   completeIndex(input: { path: string; etag: string | null; action: IndexAction }): Promise<boolean>;
   failIndex(input: { path: string; etag: string | null; action: IndexAction; error: string; notBefore: number }): Promise<void>;
+  listDeletionIndex(input: { snapshotSeq?: string; cursor?: string; limit: number }): Promise<DeletionIndexPage>;
 };
 
 /** Adapts a synchronous store (tests, in-process use) to the consumer-facing port. */
@@ -83,5 +86,6 @@ export function journalFromStore(store: MutationStore): MutationJournal {
     async claimPendingIndex(input) { return store.claimPendingIndex(input); },
     async completeIndex(input) { return store.completeIndex(input); },
     async failIndex(input) { store.failIndex(input); },
+    async listDeletionIndex(input) { return store.listDeletionIndex(input); },
   };
 }

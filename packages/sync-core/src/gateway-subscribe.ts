@@ -25,7 +25,7 @@ function validChange(value: unknown): value is RemoteChangeMessage["changes"][nu
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const change = value as Record<string, unknown>;
   if (change.op === "put") return Object.keys(change).every(key => ["op", "path", "etag", "size", "modified"].includes(key)) && path(change.path) && (change.etag === undefined || typeof change.etag === "string") && (change.size === undefined || typeof change.size === "number") && (change.modified === undefined || typeof change.modified === "string");
-  if (change.op === "delete") return Object.keys(change).every(key => key === "op" || key === "path") && path(change.path);
+  if (change.op === "delete") return Object.keys(change).every(key => ["op", "path", "etag"].includes(key)) && path(change.path) && (change.etag === undefined || typeof change.etag === "string" && change.etag.length > 0 && change.etag.length <= 256);
   return change.op === "rename" && Object.keys(change).every(key => ["op", "from", "to", "etag"].includes(key)) && path(change.from) && path(change.to) && (change.etag === undefined || typeof change.etag === "string");
 }
 

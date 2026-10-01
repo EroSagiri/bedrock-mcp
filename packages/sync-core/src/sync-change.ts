@@ -22,7 +22,7 @@ export type RemoteChangeHint = {
 /** A bounded, path-scoped fact accompanying one gateway generation. */
 export type RemoteChange =
   | { op: "put"; path: string; etag?: string; size?: number; modified?: string }
-  | { op: "delete"; path: string }
+  | { op: "delete"; path: string; etag?: string }
   | { op: "rename"; from: string; to: string; etag?: string };
 
 export type MarkRemoteDirtyRequest = RemoteChangeHint & {

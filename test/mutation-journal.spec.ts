@@ -116,6 +116,7 @@ type VaultIndexStub = {
   claimPendingIndex(input: { path: string; etag: string | null; action: string; now: number }): Promise<{ status: string; attempts?: number }>;
   completeIndex(input: { path: string; etag: string | null; action: string }): Promise<boolean>;
   failIndex(input: { path: string; etag: string | null; action: string; error: string; notBefore: number }): Promise<void>;
+  listDeletionIndex(input: { snapshotSeq?: string; cursor?: string; limit: number }): Promise<{ snapshotSeq: string; entries: Array<{ path: string; deletedRemoteETag: string }>; nextCursor?: string }>;
 };
 
 function vaultIndex(): VaultIndexStub {
@@ -125,6 +126,28 @@ function vaultIndex(): VaultIndexStub {
 const flush = () => new Promise(resolve => setTimeout(resolve, 5));
 
 describe("Mutation Journal durability (VaultIndex)", () => {
+  it("pages a stable latest-deletion snapshot while newer mutations continue", async () => {
+    const index = vaultIndex();
+    await index.resetMutationState();
+    const record = (event: Record<string, unknown>) => index.recordMutation({ event, intents: [] });
+    await record({ id: "del_a", source: "obsidian", op: "delete", path: "a.md", etag: "A", committedAt: 1_000 });
+    await record({ id: "del_b", source: "obsidian", op: "delete", path: "b.md", etag: "B", committedAt: 2_000 });
+
+    const first = await index.listDeletionIndex({ limit: 1 });
+    expect(first.entries).toEqual([{ path: "a.md", deletedRemoteETag: "A", committedAt: 1_000, mutationSeq: 1 }]);
+    expect(first.nextCursor).toBe("a.md");
+
+    // These are outside the captured snapshot: page two must neither lose B nor gain C.
+    await record({ id: "put_a", source: "mcp", op: "put", path: "a.md", etag: "A2", size: 1, committedAt: 3_000 });
+    await record({ id: "del_c", source: "mcp", op: "delete", path: "c.md", etag: "C", committedAt: 4_000 });
+    const second = await index.listDeletionIndex({ snapshotSeq: first.snapshotSeq, cursor: first.nextCursor, limit: 1 });
+    expect(second.entries).toEqual([{ path: "b.md", deletedRemoteETag: "B", committedAt: 2_000, mutationSeq: 2 }]);
+    expect(second.nextCursor).toBeUndefined();
+
+    const fresh = await index.listDeletionIndex({ limit: 10 });
+    expect(fresh.entries.map(entry => entry.path)).toEqual(["b.md", "c.md"]);
+  });
+
   it("commits the fact and its intents together, and is idempotent by mutation_id", async () => {
     const index = vaultIndex();
     await index.resetMutationState();
@@ -132,9 +155,9 @@ describe("Mutation Journal durability (VaultIndex)", () => {
     const first = await index.recordMutation({ event, intents: indexIntentsFor(event as never) });
     const second = await index.recordMutation({ event, intents: indexIntentsFor(event as never) });
 
-    expect(first).toMatchObject({ inserted: true, seq: 1 });
-    expect(second).toMatchObject({ inserted: false, seq: 1 });
-    await expect(index.findMutation("mut_do_one")).resolves.toMatchObject({ id: "mut_do_one", seq: 1 });
+    expect(first).toMatchObject({ inserted: true });
+    expect(second).toMatchObject({ inserted: false, seq: first.seq });
+    await expect(index.findMutation("mut_do_one")).resolves.toMatchObject({ id: "mut_do_one", seq: first.seq });
     const summary = await index.pendingSummary(1_000);
     expect(summary.due).toBe(1);
     expect(summary.upserts).toBe(1);

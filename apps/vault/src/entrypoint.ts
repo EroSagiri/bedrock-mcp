@@ -25,6 +25,7 @@ import type { MutationRecorder } from "./mutation/recorder";
 import type { MutationJournal } from "./mutation/store";
 import type { MutationEvent } from "./mutation/types";
 import { isReportedMutation, type MutationVerdict, type ReportedMutation } from "@mineral/sync-core/sync-change";
+import type { DeletionIndexPage } from "@mineral/sync-core/deletion-index";
 import { createGatewayPublisher, type GatewayRpcBinding } from "./sync-publisher/gateway-rpc";
 import { drainSyncOutbox } from "./sync-publisher/publisher";
 import { drainDueIndex } from "./index/scheduler";
@@ -166,6 +167,13 @@ export default class VaultEntrypoint extends WorkerEntrypoint<VaultWorkerEnv> {
       console.error(`mutation report failed id=${event.id} error=${error instanceof Error ? error.message.slice(0, 200) : "unknown"}`);
       return { verdict: "refused", reason: "unavailable" };
     }
+  }
+
+  /** A channel-scoped, stable snapshot of the journal's current logical deletions. */
+  async listSyncDeletions(input: { channel: string; snapshotSeq?: string; cursor?: string; limit: number }): Promise<DeletionIndexPage | null> {
+    const channel = await this.gatewayChannel();
+    if (!channel || channel !== input.channel) return null;
+    return this.journal().listDeletionIndex({ snapshotSeq: input.snapshotSeq, cursor: input.cursor, limit: input.limit });
   }
 
   /**

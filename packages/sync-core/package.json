@@ -11,6 +11,11 @@
       "import": "./dist/sync-change.js",
       "default": "./dist/sync-change.js"
     },
+    "./deletion-index": {
+      "types": "./dist/deletion-index.d.ts",
+      "import": "./dist/deletion-index.js",
+      "default": "./dist/deletion-index.js"
+    },
     "./channel": {
       "types": "./dist/channel.d.ts",
       "import": "./dist/channel.js",

@@ -13,6 +13,7 @@ import { VECTOR_SCHEMA, vectorIndexSchema } from "../vector/schema";
 import { mutationLog } from "../mutation/ids";
 import type { DueIndexIntent, IndexClaim, PendingIndexSummary, RecordMutationResult } from "../mutation/store";
 import type { JournalEntry, MutationEvent } from "../mutation/types";
+import type { DeletionIndexPage } from "@mineral/sync-core/deletion-index";
 
 /**
  * The Vectorize binding, described structurally.
@@ -512,6 +513,10 @@ export class VaultIndex extends DurableObject<Env> {
 
   async failIndex(input: { path: string; etag: string | null; action: IndexAction; error: string; notBefore: number }): Promise<void> {
     this.mutations.failIndex(input);
+  }
+
+  async listDeletionIndex(input: { snapshotSeq?: string; cursor?: string; limit: number }): Promise<DeletionIndexPage> {
+    return this.mutations.listDeletionIndex(input);
   }
 
   /**
@@ -1028,5 +1033,4 @@ function escapeLike(value: string): string {
 function likeContains(value: string): string {
   return `%${escapeLike(value)}%`;
 }
-
 

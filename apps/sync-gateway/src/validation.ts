@@ -17,7 +17,7 @@ function validChange(value: unknown): value is RemoteChange {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const change = value as Record<string, unknown>;
   if (change.op === "put") return Object.keys(change).every(key => ["op", "path", "etag", "size", "modified"].includes(key)) && validPath(change.path) && (change.etag === undefined || typeof change.etag === "string") && (change.size === undefined || typeof change.size === "number" && Number.isFinite(change.size) && change.size >= 0) && (change.modified === undefined || typeof change.modified === "string");
-  if (change.op === "delete") return Object.keys(change).every(key => key === "op" || key === "path") && validPath(change.path);
+  if (change.op === "delete") return Object.keys(change).every(key => ["op", "path", "etag"].includes(key)) && validPath(change.path) && (change.etag === undefined || typeof change.etag === "string" && change.etag.length > 0 && change.etag.length <= 256);
   return change.op === "rename" && Object.keys(change).every(key => ["op", "from", "to", "etag"].includes(key)) && validPath(change.from) && validPath(change.to) && (change.etag === undefined || typeof change.etag === "string");
 }
 

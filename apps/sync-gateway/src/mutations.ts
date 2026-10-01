@@ -1,4 +1,5 @@
 import { isReportedMutation, isMutationVerdict, type MutationVerdict, type ReportedMutation } from "@mineral/sync-core/sync-change";
+import type { VaultDeletionBinding } from "./deletions";
 
 /**
  * The Vault, as the Gateway needs it: one method that records a reported mutation.
@@ -7,7 +8,7 @@ import { isReportedMutation, isMutationVerdict, type MutationVerdict, type Repor
  * the Vault's implementation — only on this contract. It is the mirror of `GatewayRpcBinding` on the
  * other side of the same pair.
  */
-export type VaultMutationBinding = {
+export type VaultMutationBinding = VaultDeletionBinding & {
   recordReportedMutation(request: ReportedMutation): Promise<MutationVerdict>;
 };
 

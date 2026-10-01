@@ -17,8 +17,8 @@ export type GatewayPublisher = {
 };
 
 /** The gateway's only vocabulary for a knowledge-base write. */
-export function gatewayChangesFor(event: MutationEvent): Array<{ op: "put"; path: string; etag?: string; size?: number } | { op: "delete"; path: string }> {
-  if (event.op === "delete") return [{ op: "delete", path: event.path }];
+export function gatewayChangesFor(event: MutationEvent): Array<{ op: "put"; path: string; etag?: string; size?: number } | { op: "delete"; path: string; etag?: string }> {
+  if (event.op === "delete") return [{ op: "delete", path: event.path, ...(event.etag ? { etag: event.etag } : {}) }];
   return [{ op: "put", path: event.path, ...(event.etag ? { etag: event.etag } : {}), ...(typeof event.size === "number" ? { size: event.size } : {}) }];
 }
 
