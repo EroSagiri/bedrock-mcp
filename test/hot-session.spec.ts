@@ -124,6 +124,30 @@ async function sessionFor(path: string, clientId: string, local: string | null) 
 }
 
 describe("hot session: acquisition and realtime convergence", () => {
+  it("replaces an older socket for the same logical client without echoing or losing the edit", async () => {
+    const path = "notes/hot-same-client-reload.md";
+    const oldInstance = await sessionFor(path, "client-a", null);
+    const peer = await sessionFor(path, "client-b", null);
+    const replacement = await sessionFor(path, "client-a", null);
+    expect(replacement.identity).toEqual(oldInstance.identity);
+
+    const local = client();
+    replacement.socket.send(operationFrame({
+      identity: replacement.identity,
+      clientId: "client-a",
+      clientOperationId: "op-after-reload",
+      update: local.edit(text => text.insert(0, "one local edit")),
+      parentRevision: 0,
+    }));
+    expect(await replacement.frames.until(frame => frame.type === "ack")).toMatchObject({ serverRevision: 1, duplicate: false });
+    expect(await peer.frames.until(frame => frame.type === "operation")).toMatchObject({ clientOperationId: "op-after-reload", serverRevision: 1 });
+    expect(oldInstance.frames.pending().filter(frame => frame.type === "operation")).toEqual([]);
+
+    oldInstance.socket.close();
+    replacement.socket.close();
+    peer.socket.close();
+  });
+
   it("creates an incarnation for a free path, joins it from a second client, and converges", async () => {
     const path = "notes/hot-converge.md";
     const first = await sessionFor(path, "client-a", null);
@@ -308,4 +332,3 @@ describe("hot session: external mutation", () => {
  * behaviour: nothing in the assertions below depends on it.
  */
 afterAll(async () => { await new Promise(resolve => setTimeout(resolve, 400)); });
-

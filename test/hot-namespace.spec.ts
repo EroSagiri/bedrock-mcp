@@ -344,6 +344,9 @@ describe("namespace: rename", () => {
     expect((await pathStatus(from)).remote?.deleted).toBe(true);
     expect((await pathStatus(to)).binding?.epoch).toBe(2);
 
+    const renamed = await session.frames.until(frame => frame.type === "document-state" && frame.state === "active");
+    expect(renamed).toMatchObject({ documentId: identity.documentId, epoch: 2, canonicalPath: to, reason: "renamed" });
+
     // The old epoch is refused: a packet from before the rename cannot land in the new incarnation.
     session.socket.send(editFrame({ documentId: identity.documentId, epoch: identity.epoch, clientId: "client-a", clientOperationId: "op-old-epoch", update: local.fork().update(body => body.insert(body.length, " late")), parentRevision: 1 }));
     expect((await session.frames.until(frame => frame.type === "reject")).reason).toBe("stale-epoch");
@@ -723,7 +726,6 @@ describe("path observation", () => {
  * behaviour: nothing in the assertions below depends on it.
  */
 afterAll(async () => { await new Promise(resolve => setTimeout(resolve, 400)); });
-
 
 
 

@@ -179,10 +179,15 @@ export class LiveDocumentRoom extends DurableObject<GatewayHotEnv> {
       CREATE INDEX IF NOT EXISTS operations_revision ON operations(revision);
       CREATE TABLE IF NOT EXISTS clients (
         client_id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL DEFAULT '',
         joined_at INTEGER NOT NULL,
         last_seen_at INTEGER NOT NULL
       );
     `);
+    const clientColumns = [...this.sql().exec<{ name: string }>("PRAGMA table_info(clients)")];
+    if (!clientColumns.some(column => column.name === "connection_id")) {
+      this.sql().exec("ALTER TABLE clients ADD COLUMN connection_id TEXT NOT NULL DEFAULT ''");
+    }
   }
 
   private now(): number {
@@ -447,6 +452,18 @@ export class LiveDocumentRoom extends DurableObject<GatewayHotEnv> {
     room.latestCheckpointedRevision = room.latestAcceptedRevision;
     this.persist();
     await this.ctx.storage.deleteAlarm();
+    // A rename keeps the socket but changes both pieces of its authority: path and epoch. Every client
+    // must learn that fence before it can produce its next operation; otherwise it keeps sending the old
+    // epoch and the room correctly rejects every keystroke as stale.
+    this.broadcast({
+      protocol: HOT_PROTOCOL_VERSION,
+      type: "document-state",
+      documentId: room.documentId,
+      epoch: room.epoch,
+      state: "active",
+      canonicalPath: room.canonicalPath,
+      reason: "renamed",
+    });
     return this.describeInternal();
   }
 
@@ -843,12 +860,25 @@ export class LiveDocumentRoom extends DurableObject<GatewayHotEnv> {
    * Sockets
    * ------------------------------------------------------------------------------------------ */
 
-  private broadcast(message: unknown, except?: WebSocket): void {
+  private socketAttachment(socket: WebSocket): { clientId?: string; epoch?: number; connectionId?: string } {
+    return (socket.deserializeAttachment() as { clientId?: string; epoch?: number; connectionId?: string } | null) ?? {};
+  }
+
+  private broadcast(message: unknown, except?: WebSocket, exceptClientId?: string): void {
     const payload = JSON.stringify(message);
     for (const socket of this.ctx.getWebSockets()) {
       if (socket === except) continue;
+      // A logical client may overlap with its previous connection while a plugin reload or reconnect
+      // is being torn down. Its own operation must never come back through that stale socket: the old
+      // bridge would treat it as remote input and can feed the editor write back as another local edit.
+      if (exceptClientId && this.socketAttachment(socket).clientId === exceptClientId) continue;
       try { socket.send(payload); } catch { try { socket.close(1011, "send failed"); } catch {} }
     }
+  }
+
+  private currentConnectionId(clientId: string): string | null {
+    const rows = [...this.sql().exec<{ connection_id: string }>("SELECT connection_id FROM clients WHERE client_id = ?", clientId)];
+    return rows.length === 0 ? null : String(rows[0].connection_id);
   }
 
   private send(socket: WebSocket, message: unknown): void {
@@ -866,14 +896,24 @@ export class LiveDocumentRoom extends DurableObject<GatewayHotEnv> {
     if (room.epoch !== epoch) return new Response("stale epoch", { status: 409 });
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
+    const connectionId = crypto.randomUUID();
     this.ctx.acceptWebSocket(server);
-    server.serializeAttachment({ clientId, epoch });
+    server.serializeAttachment({ clientId, epoch, connectionId });
     this.sql().exec(
-      "INSERT INTO clients (client_id, joined_at, last_seen_at) VALUES (?, ?, ?) ON CONFLICT(client_id) DO UPDATE SET last_seen_at = excluded.last_seen_at",
+      `INSERT INTO clients (client_id, connection_id, joined_at, last_seen_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT(client_id) DO UPDATE SET connection_id = excluded.connection_id, last_seen_at = excluded.last_seen_at`,
       clientId,
+      connectionId,
       this.now(),
       this.now(),
     );
+    // One client id represents one plugin/device authority. Replace an older transport before the
+    // welcome is emitted; the welcome contains every operation accepted before this turn, and the
+    // connection id fence rejects any stale message that was already queued on the old socket.
+    for (const existing of this.ctx.getWebSockets()) {
+      if (existing === server || this.socketAttachment(existing).clientId !== clientId) continue;
+      try { existing.close(4001, "superseded"); } catch { /* the active-connection fence still rejects it */ }
+    }
     this.send(server, {
       protocol: HOT_PROTOCOL_VERSION,
       type: "welcome",
@@ -905,10 +945,15 @@ export class LiveDocumentRoom extends DurableObject<GatewayHotEnv> {
     // A keepalive is answered by the runtime at the protocol level; it needs no room state.
     if (frame.type === "ping") return;
 
-    const attachment = socket.deserializeAttachment() as { clientId?: string } | null;
+    const attachment = this.socketAttachment(socket);
     const clientId = attachment?.clientId ?? frame.clientId;
     if (frame.type === "operation" && frame.clientId !== clientId) {
       this.send(socket, { protocol: HOT_PROTOCOL_VERSION, type: "reject", documentId: frame.documentId, epoch: frame.epoch, clientOperationId: frame.clientOperationId, reason: "unauthorized" });
+      return;
+    }
+    if (attachment.connectionId !== this.currentConnectionId(clientId)) {
+      this.send(socket, { protocol: HOT_PROTOCOL_VERSION, type: "error", code: "superseded" });
+      try { socket.close(4001, "superseded"); } catch { /* already closed */ }
       return;
     }
 
@@ -920,7 +965,7 @@ export class LiveDocumentRoom extends DurableObject<GatewayHotEnv> {
       }
       if (!outcome.duplicate) {
         const broadcast: HotServerOperation = { ...frame, serverRevision: outcome.revision };
-        this.broadcast(broadcast, socket);
+        this.broadcast(broadcast, socket, clientId);
       }
       this.send(socket, {
         protocol: HOT_PROTOCOL_VERSION,
@@ -964,7 +1009,7 @@ export class LiveDocumentRoom extends DurableObject<GatewayHotEnv> {
     }
 
     if (frame.type === "leave") {
-      this.sql().exec("DELETE FROM clients WHERE client_id = ?", clientId);
+      this.sql().exec("DELETE FROM clients WHERE client_id = ? AND connection_id = ?", clientId, attachment.connectionId ?? "");
       if (frame.checkpoint) await this.checkpointNow();
       const remaining = this.ctx.getWebSockets().filter(candidate => candidate !== socket).length;
       if (remaining === 0) {
@@ -979,8 +1024,16 @@ export class LiveDocumentRoom extends DurableObject<GatewayHotEnv> {
 
   async webSocketClose(socket: WebSocket): Promise<void> {
     await this.load();
-    const attachment = socket.deserializeAttachment() as { clientId?: string } | null;
-    if (attachment?.clientId) this.sql().exec("DELETE FROM clients WHERE client_id = ?", attachment.clientId);
+    const attachment = this.socketAttachment(socket);
+    if (attachment.clientId) {
+      // A superseded socket closes after its replacement is already registered. The connection-id
+      // predicate prevents that late close from deleting the replacement's presence row.
+      this.sql().exec(
+        "DELETE FROM clients WHERE client_id = ? AND connection_id = ?",
+        attachment.clientId,
+        attachment.connectionId ?? "",
+      );
+    }
     const remaining = this.ctx.getWebSockets().filter(candidate => candidate !== socket).length;
     const room = this.room;
     if (remaining === 0 && room && room.state === "active") {
@@ -1191,4 +1244,3 @@ function parseTarget(value: unknown): RoomCheckpointTarget | null {
     return null;
   }
 }
-
