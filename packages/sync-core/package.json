@@ -1,11 +1,18 @@
 {
   "name": "@mineral/sync-core",
-  "version": "0.2.0",
+  "version": "0.0.2",
   "private": true,
   "type": "module",
   "description": "Cross-repository sync control-plane contracts, channel derivation, and generation cursors.",
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "exports": {
+    "./storage": {
+      "types": "./dist/storage.d.ts",
+      "import": "./dist/storage.js",
+      "default": "./dist/storage.js"
+    },
     "./sync-change": {
       "types": "./dist/sync-change.d.ts",
       "import": "./dist/sync-change.js",
@@ -60,4 +67,3 @@
     "typescript": "^5.5.2"
   }
 }
-

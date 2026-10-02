@@ -1,4 +1,4 @@
-import { env } from "cloudflare:test";
+import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import type { GatewayEnv } from "../apps/sync-gateway/src/index";
 import type { VaultWorkerEnv } from "../apps/vault/src/entrypoint";
@@ -10,6 +10,7 @@ import type { RemoteChange } from "@mineral/sync-core/sync-change";
 import type { VaultRpc } from "@mineral/core/vault-rpc";
 import type { VaultHotRpc } from "@mineral/core/vault-rpc";
 import type { CheckpointReceipt } from "@mineral/sync-core/hot-protocol";
+import { SqlMutationStore } from "../apps/vault/src/index/journal-store";
 
 /**
  * The bindings the integration test worker provides.
@@ -28,6 +29,31 @@ export function bindings(): TestBindings {
 export function vaultIndex(): VaultIndex {
   const configured = bindings();
   return configured.VAULT_INDEX.get(configured.VAULT_INDEX.idFromName("vault")) as unknown as VaultIndex;
+}
+
+/** Measure actual workerd SQLite reads while unrelated edit history grows. */
+export async function deletionIndexReadCost(extraPuts: number): Promise<{ before: number; after: number; paths: string[] }> {
+  const namespace = bindings().VAULT_INDEX;
+  const stub = namespace.getByName(`deletion-read-cost-${crypto.randomUUID()}`);
+  return runInDurableObject(stub, (_instance, state) => {
+    let reads = 0;
+    const store = new SqlMutationStore({ exec<T extends Record<string, unknown>>(query: string, ...bindings: unknown[]) {
+      const cursor = state.storage.sql.exec(query, ...bindings);
+      const rows = [...cursor];
+      reads += cursor.rowsRead;
+      return rows as T[];
+    } });
+    store.record({ id: "cost_deleted", source: "obsidian", op: "delete", path: "deleted.md", etag: "D", committedAt: 1 }, []);
+    reads = 0;
+    store.listDeletionIndex({ limit: 10 });
+    const before = reads;
+    state.storage.transactionSync(() => {
+      for (let i = 0; i < extraPuts; i++) state.storage.sql.exec("INSERT INTO mutation_journal (mutation_id, source, op, path, etag, size, committed_at, created_at) VALUES (?, 'obsidian', 'put', 'editing.md', ?, 1, ?, ?)", `cost_edit_${i}`, `E${i}`, i, i);
+    });
+    reads = 0;
+    const page = store.listDeletionIndex({ limit: 10 });
+    return { before, after: reads, paths: page.entries.map(entry => entry.path) };
+  });
 }
 
 /** The deployed Gateway's RPC entrypoint, reached through the test worker's own exports. */

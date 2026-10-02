@@ -7,6 +7,7 @@ import { backlinkTargets, scanTextFiles } from "../../vault-client";
 import { extractTags, extractWikilinks, parseFrontmatter } from "../../utils/markdown";
 import { relativeTime } from "../../utils/time";
 import { assertTextKey, backupTextObject, err, keyError, moveObject, ok, stripTextExt, trashKey, wikilinkReplacement, type McpRegistrationContext } from "../shared";
+import { isSystemStorageKey } from "@mineral/sync-core/storage";
 
 export function registerLinkTools(ctx: McpRegistrationContext): void {
 
@@ -37,7 +38,7 @@ export function registerLinkTools(ctx: McpRegistrationContext): void {
         const linkUpdates = updateLinks === false
           ? []
           : await scanTextFiles(ctx.env.vault.documents, undefined, (key, text, obj) => {
-              if (key === from || key === to || key.startsWith(".history/") || key.startsWith(".trash/")) return null;
+              if (key === from || key === to || isSystemStorageKey(key)) return null;
               const replaced = wikilinkReplacement(text, targets, replacement);
               if (!replaced.changed) return null;
               return {

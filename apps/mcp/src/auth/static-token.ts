@@ -1,3 +1,5 @@
+import { isSystemStorageKey } from "@mineral/sync-core/storage";
+
 const TOKEN_AUDIENCE = "mineral-static";
 const MAX_TTL_SECONDS = 60 * 60;
 
@@ -38,12 +40,12 @@ async function importHmacKey(secret: string): Promise<CryptoKey> {
 export function normalizeStaticPrefix(prefix?: string): string | null {
   const normalized = (prefix ?? "").trim().replace(/\\/g, "/").replace(/^\/+/, "");
   if (normalized.includes("..") || normalized.includes("//")) return null;
-  if (normalized.startsWith(".history/") || normalized.startsWith(".trash/")) return null;
+  if (isSystemStorageKey(normalized)) return null;
   return normalized && !normalized.endsWith("/") ? `${normalized}/` : normalized;
 }
 
 export function isProtectedSystemKey(key: string): boolean {
-  return key.startsWith(".history/") || key.startsWith(".trash/");
+  return isSystemStorageKey(key);
 }
 
 export async function createStaticAccessToken(

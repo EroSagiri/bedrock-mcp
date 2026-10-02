@@ -38,6 +38,8 @@ export const MUTATION_SCHEMA = `
   );
   CREATE INDEX IF NOT EXISTS mutation_journal_broadcast ON mutation_journal(broadcast_state, seq);
   CREATE INDEX IF NOT EXISTS mutation_journal_path_seq ON mutation_journal(path, seq DESC);
+  CREATE INDEX IF NOT EXISTS mutation_journal_deletions ON mutation_journal(path, seq DESC) WHERE op = 'delete' AND etag IS NOT NULL;
+  CREATE INDEX IF NOT EXISTS mutation_journal_rename_source ON mutation_journal(from_path, seq DESC) WHERE op = 'rename' AND from_path IS NOT NULL;
   CREATE TABLE IF NOT EXISTS pending_index (
     path TEXT PRIMARY KEY,
     action TEXT NOT NULL,
@@ -301,9 +303,9 @@ export class SqlMutationStore implements MutationStore {
   /**
    * Latest deletion per path in a stable journal snapshot.
    *
-   * A later put removes a path from the result by winning `ROW_NUMBER`; a later delete replaces the
-   * older one. The extra row is only a pagination sentinel, so every page is bounded and no caller
-   * ever has to fetch tombstone bodies to discover the current deletion set.
+   * Enumerate deletion candidates, then use indexed existence checks for any later path event or
+   * rename source. Ranking the entire journal on every sync made ordinary edits amplify read usage.
+   * The sequence ceiling applies to every check so pagination retains its captured snapshot.
    */
   listDeletionIndex(input: { snapshotSeq?: string; cursor?: string; limit: number }): DeletionIndexPage {
     const current = this.first<{ seq: number | null }>("SELECT MAX(seq) seq FROM mutation_journal")?.seq ?? 0;
@@ -311,20 +313,21 @@ export class SqlMutationStore implements MutationStore {
     if (!Number.isSafeInteger(requested) || requested < 0 || requested > current) throw new TypeError("invalid deletion snapshot");
     const limit = Math.min(500, Math.max(1, Math.floor(input.limit)));
     const rows = [...this.db.exec<{ path: string; etag: string; committed_at: number; seq: number }>(
-      `WITH path_events AS (
-         SELECT seq, path, op, etag, committed_at FROM mutation_journal WHERE seq <= ?
-         UNION ALL
-         SELECT seq, from_path path, 'delete' op, NULL etag, committed_at
-           FROM mutation_journal WHERE seq <= ? AND op = 'rename' AND from_path IS NOT NULL
-       ), latest AS (
-         SELECT path, op, etag, committed_at, seq,
-                ROW_NUMBER() OVER (PARTITION BY path ORDER BY seq DESC) rank
-           FROM path_events
-       )
-       SELECT path, etag, committed_at, seq FROM latest
-        WHERE rank = 1 AND op = 'delete' AND etag IS NOT NULL AND path > ?
-        ORDER BY path LIMIT ?`,
-      requested, requested, input.cursor ?? "", limit + 1,
+      `SELECT deleted.path, deleted.etag, deleted.committed_at, deleted.seq
+         FROM mutation_journal deleted
+        WHERE deleted.op = 'delete' AND deleted.etag IS NOT NULL
+          AND deleted.seq <= ? AND deleted.path > ?
+          AND NOT EXISTS (
+            SELECT 1 FROM mutation_journal later
+             WHERE later.path = deleted.path AND later.seq > deleted.seq AND later.seq <= ?
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM mutation_journal renamed
+             WHERE renamed.op = 'rename' AND renamed.from_path IS NOT NULL
+               AND renamed.from_path = deleted.path AND renamed.seq > deleted.seq AND renamed.seq <= ?
+          )
+        ORDER BY deleted.path LIMIT ?`,
+      requested, input.cursor ?? "", requested, requested, limit + 1,
     )];
     const page = rows.slice(0, limit);
     const entries: IndexedDeletion[] = page.map(row => ({ path: row.path, deletedRemoteETag: row.etag, committedAt: row.committed_at, mutationSeq: row.seq }));

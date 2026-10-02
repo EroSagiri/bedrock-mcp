@@ -5,6 +5,7 @@ import { TEXT_EXTS, encodeUtf8, guessContentType, isTextFile, textContentTypeFor
 import { extractTags, extractWikilinks, parseFrontmatter } from "../../utils/markdown";
 import { relativeTime } from "../../utils/time";
 import { assertTextKey, backupTextObject, err, keyError, moveObject, ok, stripTextExt, trashKey, wikilinkReplacement, type McpRegistrationContext } from "../shared";
+import { isSystemStorageKey, versionSourcePath } from "@mineral/sync-core/storage";
 
 export function registerDocumentTools(ctx: McpRegistrationContext): void {
 
@@ -99,7 +100,7 @@ export function registerDocumentTools(ctx: McpRegistrationContext): void {
         key: z.string().min(1),
         patch: z.string().min(1).describe("unified diff patch，可由 doc_preview_diff 或外部工具生成"),
         dryRun: z.boolean().optional().describe("默认 true，只返回应用后的 diff 预览；false 才写入"),
-        createBackup: z.boolean().optional().describe("写入前是否备份到 .history，默认 true"),
+        createBackup: z.boolean().optional().describe("写入前是否备份到 .mineral/versions，默认 true"),
         fuzzFactor: z.number().int().min(0).max(5).optional().describe("patch 模糊匹配，默认 0"),
       },
       async ({ key, patch, dryRun, createBackup, fuzzFactor }) => {
@@ -143,7 +144,7 @@ export function registerDocumentTools(ctx: McpRegistrationContext): void {
     );
 
 
-    // 备份单篇文本文件到 .history
+    // 备份单篇文本文件到 .mineral/versions
     registerToolCompat(ctx.server,
       "doc_backup",
       { key: z.string().min(1) },
@@ -159,30 +160,38 @@ export function registerDocumentTools(ctx: McpRegistrationContext): void {
     );
 
 
-    // 从 .history 或任意文本备份 key 恢复到目标文件
+    // 从 .mineral/versions 或任意文本备份 key 恢复到目标文件
     registerToolCompat(ctx.server,
       "doc_restore",
       {
-        backupKey: z.string().min(1).describe("备份对象 key，例如 .history/<timestamp>/path/file.md"),
-        targetKey: z.string().min(1).optional().describe("恢复目标；不传则从 backupKey 去掉 .history/<timestamp>/ 前缀"),
+        backupKey: z.string().min(1).describe("备份对象 key，例如 .mineral/versions/<timestamp>/path/file.md"),
+        targetKey: z.string().min(1).optional().describe("恢复目标；不传则从 backupKey 去掉 .mineral/versions/<timestamp>/ 前缀"),
         overwrite: z.boolean().optional().describe("目标存在时是否覆盖，默认 false"),
       },
       async ({ backupKey, targetKey, overwrite }) => {
         const backupInvalid = keyError(backupKey);
         if (backupInvalid) return err(backupInvalid);
-        const inferred = backupKey.replace(/^\.history\/[^/]+\//, "").replace(/^\.trash\/[^/]+\//, "");
-        const target = targetKey ?? inferred;
-        const targetInvalid = assertTextKey(target);
+        const target = targetKey ?? versionSourcePath(backupKey);
+        if (!target) return err("无法推断恢复目标，请提供 targetKey");
+        const targetInvalid = keyError(target);
         if (targetInvalid) return err(targetInvalid);
+        if (isSystemStorageKey(target)) return err("恢复目标不能是内部数据目录");
         const backup = await ctx.env.vault.documents.get(backupKey);
         if (!backup) return err(`Backup not found: ${backupKey}`);
         if (!overwrite && await ctx.env.vault.documents.head(target)) {
           return err(`目标已存在，传 overwrite: true 强制覆盖：${target}`);
         }
-        const text = await backup.text();
-        const ct = textContentTypeForKey(target, backup.httpMetadata?.contentType);
-        await ctx.env.vault.documents.put(target, encodeUtf8(text), { httpMetadata: { contentType: ct } });
-        return ok(JSON.stringify({ ok: true, backupKey, targetKey: target, contentType: ct, size: encodeUtf8(text).length }, null, 2));
+        const ct = backup.httpMetadata?.contentType ?? guessContentType(target);
+        const { sourceKey, sourcekey, createdAt, createdat, reason, sourceETag, sourceetag, mineralOriginalMetadata, mineraloriginalmetadata, ...legacyMetadata } = backup.customMetadata ?? {};
+        let originalMetadata = legacyMetadata;
+        const encodedMetadata = mineralOriginalMetadata ?? mineraloriginalmetadata;
+        if (encodedMetadata) {
+          const decoded: unknown = JSON.parse(encodedMetadata);
+          if (!decoded || typeof decoded !== "object" || Array.isArray(decoded) || Object.values(decoded).some(value => typeof value !== "string")) return err("备份的原始元数据无效");
+          originalMetadata = decoded as Record<string, string>;
+        }
+        await ctx.env.vault.documents.put(target, backup.bytes, { httpMetadata: { contentType: ct }, customMetadata: originalMetadata });
+        return ok(JSON.stringify({ ok: true, backupKey, targetKey: target, contentType: ct, size: backup.bytes.byteLength }, null, 2));
       }
     );
 

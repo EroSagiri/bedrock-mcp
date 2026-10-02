@@ -90,6 +90,7 @@ type TestClient = {
   text(): string;
   update(mutate: (body: Y.Text) => void): string;
   fork(): TestClient;
+  apply(update: string): void;
 };
 
 function clientFrom(crdtState: string): TestClient {
@@ -97,6 +98,7 @@ function clientFrom(crdtState: string): TestClient {
   Y.applyUpdate(doc, decodeHotPayload(crdtState)!);
   return {
     text: () => doc.getText("markdown").toString(),
+    apply: (update: string) => Y.applyUpdate(doc, decodeHotPayload(update)!),
     update(mutate: (body: Y.Text) => void): string {
       mutate(doc.getText("markdown"));
       return encodeHotPayload(Y.encodeStateAsUpdate(doc));
@@ -145,7 +147,7 @@ async function namespace(body: Record<string, unknown>): Promise<{ status: numbe
   return { status: response.status, result: await response.json() as NamespaceResult };
 }
 
-async function pathStatus(path: string): Promise<{ binding: PathBinding | null; hotOwned: boolean; remote: { exists: boolean; etag: string | null; deleted: boolean } | null }> {
+async function pathStatus(path: string): Promise<{ binding: PathBinding | null; hotOwned: boolean; remote: { exists: boolean; etag: string | null; deleted: boolean } | null; room: { state: string; clients: number; pendingSave: boolean; latestAcceptedRevision: number; latestCheckpointedRevision: number; currentContentHash: string } | null }> {
   return await (await request(`/v1/channels/${channel}/hot/path?path=${encodeURIComponent(path)}`)).json() as never;
 }
 
@@ -281,8 +283,12 @@ describe("namespace: delete", () => {
     expect(deletion.result.outcome).toBe("applied");
     expect(deletion.result.binding?.state).toBe("deleted");
     expect(deletion.result.binding?.documentId).toBe(identity.documentId);
-    // The object stays; the deletion is the tombstone that retires its exact revision.
-    expect(await objectText(path)).toBe("to be deleted");
+    // The live key is gone; the exact bytes remain recoverable in the version store.
+    expect(await objectText(path)).toBeNull();
+    const versions = await bindings().MINERAL.list({ prefix: ".mineral/versions/" });
+    const archived = versions.objects.find(object => object.key.endsWith(`/${path}`));
+    expect(archived).toBeDefined();
+    expect(await objectText(archived!.key)).toBe("to be deleted");
     expect(await tombstoneExists(path, receipt.r2ETag!)).toBe(true);
     const status = await pathStatus(path);
     expect(status.remote?.deleted).toBe(true);
@@ -292,7 +298,7 @@ describe("namespace: delete", () => {
     session.socket.send(editFrame({ documentId: identity.documentId, epoch: identity.epoch, clientId: "client-a", clientOperationId: "op-late", update: local.fork().update(body => body.insert(body.length, " resurrect")), parentRevision: 1 }));
     const rejection = await session.frames.until(frame => frame.type === "reject" || frame.type === "document-state");
     expect(["reject", "document-state"]).toContain(rejection.type);
-    expect(await objectText(path)).toBe("to be deleted");
+    expect(await objectText(path)).toBeNull();
     session.socket.close();
   });
 
@@ -501,6 +507,27 @@ describe("cold-mutation authority", () => {
     void identity;
   });
 
+  it("waits for a startup cold write before adopting its new R2 revision", async () => {
+    const path = "notes/ns-cold-startup-handoff.md";
+    const { identity, session } = await hotPathWithContent(path, "client-a", "before restart");
+    session.socket.close();
+    expect(await waitFor(async () => !(await pathStatus(path)).hotOwned)).toBe(true);
+    const before = (await pathStatus(path)).remote!.etag!;
+    const lease = await coldAcquire(path, before);
+    expect(lease.outcome).toBe("granted");
+    const blocked = await acquire({ path, clientId: "client-a", local: "before restart" });
+    expect(blocked.outcome).toBe("rejected");
+    expect(blocked.reason).toBe("unavailable");
+    const updated = await bindings().MINERAL.put(path, "cold updated");
+    await request(`/v1/channels/${channel}/hot/cold/commit`, { method: "POST", body: JSON.stringify({ protocol: 1, token: lease.token, operationId: lease.operationId, clientId: "cold-writer", operation: "put", canonicalPath: path, etag: updated!.etag, size: 12, committedAt: Date.now() }) });
+    const acquired = await acquire({ path, clientId: "client-a", local: "cold updated" });
+    expect(acquired.outcome).toBe("created");
+    expect(acquired.identity!.documentId).not.toBe(identity.documentId);
+    const reopened = await openSession(acquired.sessionTicket!);
+    expect(clientFrom(reopened.crdtState).text()).toBe("cold updated");
+    reopened.socket.close();
+  });
+
   it("denies a cold delete of a path a hot session holds", async () => {
     const path = "notes/ns-cold-delete.md";
     const { session } = await hotPathWithContent(path, "client-a", "content");
@@ -512,6 +539,21 @@ describe("cold-mutation authority", () => {
     expect(result.outcome).toBe("denied");
     expect(result.reason).toBe("hot-owned");
     session.socket.close();
+  });
+
+  it("retires the binding after a leased cold deletion physically removes the source", async () => {
+    const path = "notes/ns-cold-recycle.md";
+    const { session } = await hotPathWithContent(path, "client-a", "content");
+    session.socket.close();
+    expect(await waitFor(async () => !(await pathStatus(path)).hotOwned)).toBe(true);
+    const operationId = "cold-recycle-delete";
+    const lease = await (await request(`/v1/channels/${channel}/hot/cold/acquire`, { method: "POST", body: JSON.stringify({ protocol: 1, operationId, operation: "delete", canonicalPath: path, clientId: "cold-writer", expectedRemoteETag: null }) })).json() as ColdAuthorityResult;
+    expect(lease.outcome).toBe("granted");
+    await bindings().MINERAL.delete(path);
+    await request(`/v1/channels/${channel}/hot/cold/commit`, { method: "POST", body: JSON.stringify({ protocol: 1, token: lease.token, operationId, operation: "delete", canonicalPath: path, clientId: "cold-writer", etag: null, size: null, committedAt: Date.now() }) });
+    const status = await pathStatus(path);
+    expect(status.binding?.state).toBe("deleted");
+    expect(status.remote?.deleted).toBe(true);
   });
 });
 
@@ -564,6 +606,76 @@ describe("hot conflict resolution", () => {
       body: JSON.stringify({ protocol: 1, operationId: "cold-after-accept", operation: "put", canonicalPath: path, clientId: "cold-writer", expectedRemoteETag: before.remote?.etag ?? null }),
     });
     expect((await lease.json() as ColdAuthorityResult).outcome).toBe("granted");
+  });
+
+  it("retires a conflicted incarnation before accepting R2, then edits the new room", async () => {
+    const path = "notes/ns-resolve-conflicted-accept.md";
+    const { identity, session, local } = await hotPathWithContent(path, "client-a", "ours");
+    await bindings().MINERAL.put(path, "server version");
+    session.socket.send(editFrame({ documentId: identity.documentId, epoch: identity.epoch, clientId: "client-a", clientOperationId: "losing-edit", update: local.update(body => body.insert(body.length, " losing")), parentRevision: 1 }));
+    await session.frames.until(frame => frame.type === "ack");
+    session.socket.send(checkpointFrame(identity.documentId, identity.epoch, "client-a", 2));
+    await session.frames.until(frame => frame.type === "document-state" && frame.state === "conflicted");
+    const frozen = await pathStatus(path);
+    expect(frozen.hotOwned).toBe(true);
+    expect(frozen.room).toMatchObject({ state: "conflicted", pendingSave: true, latestAcceptedRevision: 2, latestCheckpointedRevision: 1, currentContentHash: await hotContentHash("ours losing") });
+    expect(frozen.room).not.toHaveProperty("content");
+    const result = await resolve({ operationId: "accept-conflicted", canonicalPath: path, documentId: identity.documentId, epoch: identity.epoch, decision: "accept-remote" });
+    expect(result.result.outcome).toBe("abandoned");
+    expect((await pathStatus(path)).hotOwned).toBe(false);
+    expect(await objectText(path)).toBe("server version");
+    const acquired = await acquire({ path, clientId: "client-a", local: "server version" });
+    expect(acquired.outcome).toBe("created");
+    expect(acquired.identity?.documentId).not.toBe(identity.documentId);
+    const resumed = await openSession(acquired.sessionTicket!);
+    const chosen = clientFrom(resumed.crdtState);
+    expect(chosen.text()).toBe("server version");
+    resumed.socket.send(editFrame({ documentId: acquired.identity!.documentId, epoch: acquired.identity!.epoch, clientId: "client-a", clientOperationId: "typing-after-accept", update: chosen.update(body => body.insert(body.length, " typed")), parentRevision: 1 }));
+    await resumed.frames.until(frame => frame.type === "ack");
+    resumed.socket.send(checkpointFrame(acquired.identity!.documentId, acquired.identity!.epoch, "client-a", 2));
+    await resumed.frames.until(frame => frame.type === "checkpoint" && frame.documentRevision === 2);
+    expect(await objectText(path)).toBe("server version typed");
+    session.socket.close();
+    resumed.socket.close();
+  });
+
+  it("merges into the same conflicted room and rejects stale decisions", async () => {
+    const path = "notes/ns-unified-resolution.md";
+    const { identity, session, local } = await hotPathWithContent(path, "client-a", "ours");
+    await bindings().MINERAL.put(path, "R2 changed");
+    session.socket.send(editFrame({ documentId: identity.documentId, epoch: identity.epoch, clientId: "client-a", clientOperationId: "uncheckpointed", update: local.update(body => body.insert(body.length, " pending")), parentRevision: 1 }));
+    await session.frames.until(frame => frame.type === "ack");
+    session.socket.send(checkpointFrame(identity.documentId, identity.epoch, "client-a", 2));
+    await session.frames.until(frame => frame.type === "document-state" && frame.state === "conflicted");
+    const snapshot = await (await request(`/v1/channels/${channel}/hot/path?path=${encodeURIComponent(path)}&resolution=1`)).json() as { revision: number; contentHash: string; remoteETag: string; content: string; remoteContent: string };
+    expect(snapshot.content).toBe("ours pending");
+    expect(snapshot.remoteContent).toBe("R2 changed");
+    const input = { protocol: 1, decision: "merged", operationId: "manual-unified", canonicalPath: path, ...identity,
+      expectedRevision: snapshot.revision, expectedContentHash: snapshot.contentHash, expectedRemoteETag: snapshot.remoteETag, content: "ours pending + R2 changed" };
+    const submit = async (body: Record<string, unknown>) => await (await request(`/v1/channels/${channel}/hot/resolve`, { method: "POST", body: JSON.stringify(body) })).json() as { outcome: string; revision: number };
+    expect((await submit({ ...input, confirmOnly: true })).outcome).toBe("stale");
+    expect((await pathStatus(path)).room?.latestAcceptedRevision).toBe(2);
+    expect((await submit({ ...input, expectedRevision: 1 })).outcome).toBe("stale");
+    expect(await objectText(path)).toBe("R2 changed");
+    expect((await submit({ ...input, expectedRemoteETag: "old" })).outcome).toBe("stale");
+    const accepted = await submit(input);
+    expect(accepted.outcome).toBe("saved");
+    expect(accepted.revision).toBe(3);
+    expect((await pathStatus(path)).binding?.documentId).toBe(identity.documentId);
+    expect(await objectText(path)).toBe(input.content);
+    expect(await submit(input)).toEqual(accepted);
+    expect(await submit({ ...input, confirmOnly: true })).toEqual(accepted);
+    expect((await submit({ ...input, content: "different", operationId: "manual-unified" })).outcome).toBe("stale");
+    expect((await pathStatus(path)).room?.latestAcceptedRevision).toBe(3);
+    const frame = await session.frames.until(frame => frame.type === "operation" && frame.serverRevision === 3);
+    if (frame.type === "operation") local.apply(frame.update as string);
+    // Another edit after resolution stays in the same document and checkpoints normally.
+    session.socket.send(editFrame({ documentId: identity.documentId, epoch: identity.epoch, clientId: "client-a", clientOperationId: "after-merge", update: local.update(body => body.insert(body.length, " typed")), parentRevision: 3 }));
+    await session.frames.until(frame => frame.type === "ack" && frame.serverRevision === 4);
+    session.socket.send(checkpointFrame(identity.documentId, identity.epoch, "client-a", 4));
+    await session.frames.until(frame => frame.type === "checkpoint" && frame.documentRevision === 4);
+    expect(await objectText(path)).toBe(input.content + " typed");
+    session.socket.close();
   });
 
   it("answers not-found for a path it knows nothing about", async () => {

@@ -1,5 +1,9 @@
 # 热同步实现（Phase Hot-A … Hot-E）
 
+2026-10-02 本地目录协议调整：新 tombstone 写入 `.mineral/tombstones/`，版本副本统一到
+`.mineral/versions/`；旧目录仅兼容读取，部署和迁移顺序见 [internal-storage.md](internal-storage.md)。
+这项目录调整尚未部署，以下历史线上验证不代表本次变更已经上线。
+
 状态：已实现、已部署、已用自动化端到端验证。日期：2026-09-28。
 设计文档：backend 仓库 `docs/hot-sync-design.md`（本文件描述**实现**与**验证证据**，以及尚未完成的部分）。
 
@@ -220,3 +224,39 @@ mineral-sync-gateway   d9b2d845… → acd2a3bc… → 4c0cd81c… → 443cff00�
 
 
 
+
+## 2026-10-01：服务器版本决策与冷写入交接
+
+`accept-remote` 现在先 `retire` 冲突房间（停止旧 alarm、拒绝旧会话操作），再将旧路径绑定标成已退役并清理 ownership。R2 正文和 tombstone 不因此修改；下一次 acquire 从当前 R2 创建新的 incarnation。仅删除 ownership 行不足以放开冷路径，因为 conflicted room 与 pendingSave 本身也会构成所有权。
+
+热 acquire 在路径仍有未过期 cold lease 时返回暂时不可用，避免已授权的冷写入与旧房间接入并行。插件启动也改为先恢复围栏、完成首次冷同步、再接入活动文件。正常空闲房间的 ETag 校验与重新采用 R2 的既有逻辑保持。
+
+`test/hot-namespace.spec.ts` 新增真实 workerd 回归：外部 R2 写入导致房间冲突 → accept-remote → 新房间 → 后续输入 checkpoint；以及冷租约期间拒绝热接入 → 冷写入结算 → 新房间 welcome 等于冷写入内容。插件另覆盖磁盘回写、迟到修改事件识别和启动接入顺序。
+
+
+### 2026-10-02：服务端房间冲突的只读诊断
+
+`GET /hot/path` 增加可选的 `room` 诊断字段：state、clients、pendingSave、
+latestAcceptedRevision、latestCheckpointedRevision、currentContentHash。不返回正文、
+outbox、客户端身份或凭据，不改变 sync-core 消息或 authority 协议。
+
+用途是识别本机冷冲突背后的孤立 conflicted 房间。clients=0 并不等于没有待保存数据；
+acceptedRevision 超过 checkpointedRevision 时必须保持围栏，由插件显示明确的热冲突选择。
+Windows 现场只读诊断得到 conflicted / clients=0 / revision 48 对 47，且本地文件为空，
+所以没有替用户退役此房间或修改笔记。回归测试检查诊断 revision/hash 与不返回正文。
+
+
+### 2026-10-02：按版本提交人工合并
+
+sync-core 0.2.2 新增 HotResolutionSnapshot、HotMergedResolution、HotMergedResolutionResult。
+GET path?resolution=1 只对已认证 channel 返回房间正文/版本和 R2 正文/ETag。
+POST resolve 的 merged 分支保留原 documentId/epoch，房间校验 expectedRevision、contentHash，
+以及最新观察的 R2 ETag；同步事务更新 CRDT snapshot 和人工操作去重记录，然后广播增量。
+接受与保存分开返回 pending/saved。confirmOnly 仅查询同一意图已有记录；无记录不作任何修改。
+checkpoint 已在执行时，新的全量决定返回 stale；普通并发 checkpoint 调用等待同一任务完成。
+R2 在观察后再变化，仍由 Vault 的条件写保护，失败继续保存 pending 目标。
+
+两个客户端冲突入口统一审核，人工意图由文件当前的写入方执行，热侧无需取得冷写 lease。
+原先通过 retire 旧房间来合并的实现已被人工版本校验路径替代；旧兼容接口仍供旧客户端使用。
+本次不自动替用户决定真实笔记版本。测试覆盖同房间合并、继续输入、旧 revision/ETag 拒绝、
+同操作重放与修改意图拒绝、只确认不新应用，以及停机/失败后的 checkpoint 重试。

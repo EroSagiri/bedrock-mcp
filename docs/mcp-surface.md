@@ -76,14 +76,14 @@ vault_list_documents   → R2 List（决定"有哪些"，含二进制）
 | `doc_append` | `key*`, `content*`, `separator`, `createIfMissing` | 追加 |
 | `doc_patch` | `key*`, `patch*`, `dryRun`, `createBackup`, `fuzzFactor` | 应用 unified diff |
 | `doc_preview_diff` | `key*`, `proposedContent*`, `contextLines` | 只预览不写 |
-| `doc_backup` | `key*` | 复制到 `.history/` |
+| `doc_backup` | `key*` | 复制到 `.mineral/versions/` |
 | `doc_restore` | `backupKey*`, `targetKey`, `overwrite` | 从备份还原 |
 
 ### 2.4 文件 / 对象（7）
 
 | 工具 | 参数 | 行为 |
 |---|---|---|
-| `file_delete` | `key*`, `permanent`, `dryRun` | 默认移到 `.trash/` |
+| `file_delete` | `key*`, `permanent`, `dryRun` | 默认移到 `.mineral/versions/` |
 | `file_delete_many` | `keys*`, `permanent`, `dryRun` | 同上，批量 |
 | `file_move` | `from*`, `to*`, `overwrite` | 移动/重命名对象 |
 | `file_upload_binary` | `key*`, `base64*`, `contentType` | 上传二进制 |

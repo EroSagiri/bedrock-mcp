@@ -1,4 +1,5 @@
 import { isTextDocumentKey } from "@mineral/core/keys";
+import { isSystemStorageKey } from "@mineral/sync-core/storage";
 
 /**
  * What may be indexed at all — by the note index **and** by the vector index.
@@ -7,12 +8,10 @@ import { isTextDocumentKey } from "@mineral/core/keys";
  * be a semantic hit either, and a path that only one of them skips would leave the other reporting a
  * document that does not exist as far as search is concerned.
  *
- * `.history/` and `.trash/` are the vault's own bookkeeping — a backup of a note is not the note — and
- * `.system/` holds machine-written state, not knowledge. `.mineral-sync/` is the sync layer's own
- * namespace: tombstones and verification material live there, and none of it is knowledge.
+ * `.mineral/` holds versions, tombstones and verification material, none of which is knowledge.
+ * Legacy namespaces remain excluded while deployed clients and stored objects are migrated.
  */
-const SYSTEM_PREFIXES = [".history/", ".trash/", ".system/", ".mineral-sync/"] as const;
 
 export function isIndexable(key: string): boolean {
-  return isTextDocumentKey(key) && !SYSTEM_PREFIXES.some(prefix => key.startsWith(prefix));
+  return isTextDocumentKey(key) && !isSystemStorageKey(key);
 }

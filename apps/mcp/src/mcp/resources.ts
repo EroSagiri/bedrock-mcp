@@ -1,4 +1,5 @@
 import { ResourceTemplate } from "@modelcontextprotocol/server";
+import { isSystemStorageKey } from "@mineral/sync-core/storage";
 import { isTextFile } from "@mineral/core/content";
 import { readIndex } from "./index-client";
 import { relativeTime } from "../utils/time";
@@ -9,7 +10,7 @@ import type { VaultDocuments, VaultDocumentMetadata } from "../vault-client";
 const COMPLETION_LIMIT = 50;
 
 function isSystemKey(key: string): boolean {
-  return key.startsWith(".history/") || key.startsWith(".trash/");
+  return isSystemStorageKey(key);
 }
 
 function jsonResource(uri: URL, value: unknown) {

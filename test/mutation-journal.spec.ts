@@ -3,7 +3,7 @@ import { MemoryMutationStore } from "../apps/vault/src/index/memory-store";
 import { journalFromStore } from "../apps/vault/src/mutation/store";
 import { createMutationRecorder } from "../apps/vault/src/mutation/recorder";
 import { indexIntentsFor, OBSIDIAN_INDEX_DEBOUNCE_MS } from "../apps/vault/src/index/intents";
-import { vaultIndex as vaultIndexStub } from "./support";
+import { vaultIndex as vaultIndexStub, deletionIndexReadCost } from "./support";
 
 /** A deterministic clock and id source, so a test can assert exact facts. */
 function harness() {
@@ -126,6 +126,26 @@ function vaultIndex(): VaultIndexStub {
 const flush = () => new Promise(resolve => setTimeout(resolve, 5));
 
 describe("Mutation Journal durability (VaultIndex)", () => {
+  it("keeps deletion reads bounded when thousands of unrelated edits are appended", async () => {
+    const cost = await deletionIndexReadCost(3000);
+    expect(cost.paths).toEqual(["deleted.md"]);
+    expect(cost.after).toBeLessThan(30);
+    expect(cost.after).toBeLessThanOrEqual(cost.before + 5);
+  });
+
+  it("does not revive an older deletion after a rename source or a deletion without an ETag", async () => {
+    const index = vaultIndex();
+    await index.resetMutationState();
+    const record = (event: Record<string, unknown>) => index.recordMutation({ event, intents: [] });
+    await record({ id: "old_delete", source: "obsidian", op: "delete", path: "a.md", etag: "A", committedAt: 1 });
+    const snapshot = await index.listDeletionIndex({ limit: 10 });
+    await record({ id: "rename_source", source: "mcp", op: "rename", from: "a.md", path: "new.md", etag: "N", size: 1, committedAt: 2 });
+    await record({ id: "old_b", source: "obsidian", op: "delete", path: "b.md", etag: "B", committedAt: 3 });
+    await record({ id: "new_b", source: "mcp", op: "delete", path: "b.md", committedAt: 4 });
+    expect((await index.listDeletionIndex({ limit: 10 })).entries).toEqual([]);
+    expect((await index.listDeletionIndex({ snapshotSeq: snapshot.snapshotSeq, limit: 10 })).entries.map(entry => entry.path)).toEqual(["a.md"]);
+  });
+
   it("pages a stable latest-deletion snapshot while newer mutations continue", async () => {
     const index = vaultIndex();
     await index.resetMutationState();
@@ -134,14 +154,14 @@ describe("Mutation Journal durability (VaultIndex)", () => {
     await record({ id: "del_b", source: "obsidian", op: "delete", path: "b.md", etag: "B", committedAt: 2_000 });
 
     const first = await index.listDeletionIndex({ limit: 1 });
-    expect(first.entries).toEqual([{ path: "a.md", deletedRemoteETag: "A", committedAt: 1_000, mutationSeq: 1 }]);
+    expect(first.entries).toEqual([{ path: "a.md", deletedRemoteETag: "A", committedAt: 1_000, mutationSeq: Number(first.snapshotSeq) - 1 }]);
     expect(first.nextCursor).toBe("a.md");
 
     // These are outside the captured snapshot: page two must neither lose B nor gain C.
     await record({ id: "put_a", source: "mcp", op: "put", path: "a.md", etag: "A2", size: 1, committedAt: 3_000 });
     await record({ id: "del_c", source: "mcp", op: "delete", path: "c.md", etag: "C", committedAt: 4_000 });
     const second = await index.listDeletionIndex({ snapshotSeq: first.snapshotSeq, cursor: first.nextCursor, limit: 1 });
-    expect(second.entries).toEqual([{ path: "b.md", deletedRemoteETag: "B", committedAt: 2_000, mutationSeq: 2 }]);
+    expect(second.entries).toEqual([{ path: "b.md", deletedRemoteETag: "B", committedAt: 2_000, mutationSeq: Number(first.snapshotSeq) }]);
     expect(second.nextCursor).toBeUndefined();
 
     const fresh = await index.listDeletionIndex({ limit: 10 });

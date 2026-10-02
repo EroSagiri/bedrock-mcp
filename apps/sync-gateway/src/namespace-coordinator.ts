@@ -13,6 +13,9 @@ import {
   type HotRemoteObservation,
   type PathBinding,
   type PathBindingState,
+  type HotMergedResolution,
+  type HotMergedResolutionResult,
+  type HotResolutionSnapshot,
 } from "@mineral/sync-core/hot-protocol";
 import {
   NAMESPACE_PROTOCOL_VERSION,
@@ -322,6 +325,11 @@ export class NamespaceCoordinator extends DurableObject<GatewayNamespaceEnv> {
   async acquire(input: HotAcquireRequest): Promise<HotAcquireResult> {
     const path = canonicalVaultPath(input.canonicalPath);
     if (!path) return this.rejected("invalid", typeof input.canonicalPath === "string" ? input.canonicalPath : "");
+    // A cold writer has already been authorised against R2. Joining its old room here would let
+    // welcome overwrite the just-downloaded file, or checkpoint race the in-flight cold PUT.
+    if ([...this.sql().exec<{ token: string }>("SELECT token FROM cold_leases WHERE canonical_path = ? AND expires_at >= ?", path, this.now())].length > 0) {
+      return this.rejected("unavailable", path);
+    }
     const row = this.bindingRow(path);
     const binding = row ? this.toBinding(row) : null;
     const active = binding && binding.state === "active" && binding.documentId ? binding : null;
@@ -1061,6 +1069,27 @@ export class NamespaceCoordinator extends DurableObject<GatewayNamespaceEnv> {
    * Neither choice writes content. The bytes are already where they are; this only decides which
    * authority may act next.
    */
+  async resolutionSnapshot(path: string): Promise<HotResolutionSnapshot | null> {
+    const canonical = canonicalVaultPath(path);
+    if (!canonical) return null;
+    const binding = this.bindingRow(canonical);
+    if (!binding || binding.state === "deleted") return null;
+    const snapshot = await this.room(String(binding.document_id))?.resolutionSnapshot();
+    const remote = await this.observe(canonical, true);
+    if (!snapshot || !remote || (remote.observation.exists && remote.content === undefined)) return null;
+    return { ...snapshot, remoteETag: remote.observation.etag, remoteContent: remote.content ?? "" };
+  }
+
+  async applyMergedResolution(input: HotMergedResolution): Promise<HotMergedResolutionResult> {
+    const binding = this.bindingRow(input.canonicalPath);
+    if (!binding || String(binding.document_id) !== input.documentId || Number(binding.epoch) !== input.epoch || binding.state !== "active") return { outcome: "not-found" };
+    const remote = await this.observe(input.canonicalPath, false);
+    if (!remote) throw new Error("remote observation unavailable");
+    // A retry after a successful checkpoint has changed R2 itself. The room's durable idempotency
+    // record, not a second ETag comparison, decides whether that request has already been accepted.
+    return this.room(input.documentId)!.applyMergedResolution(input, remote.observation.deleted, remote.observation.etag);
+  }
+
   async resolveHotConflict(input: { canonicalPath: string; documentId: string; epoch: DocumentEpoch; decision: "keep-local" | "accept-remote" }): Promise<{ outcome: "resolved" | "abandoned" | "not-found" }> {
     const path = canonicalVaultPath(input.canonicalPath);
     if (!path) return { outcome: "not-found" };
@@ -1075,8 +1104,11 @@ export class NamespaceCoordinator extends DurableObject<GatewayNamespaceEnv> {
     if (binding.state === "deleted") return { outcome: "not-found" };
 
     if (input.decision === "accept-remote") {
-      // The room keeps whatever state it had, but it stops being an owner: the fence comes down and the
-      // cold planner reconciles the local file against R2 with its ordinary rules.
+      // A claim row is not the whole fence: conflicted rooms and pending saves also own the path.
+      // Retire the losing incarnation so neither old sockets nor alarms can publish it again. The
+      // binding stays active until retirement succeeds; a later acquire seeds a fresh room from R2.
+      if (!(await room.retire({ expectedEpoch: input.epoch }))) return { outcome: "not-found" };
+      this.setBindingState(path, "deleted");
       this.sql().exec("DELETE FROM hot_ownership WHERE canonical_path = ?", path);
       this.sql().exec("DELETE FROM cold_leases WHERE canonical_path = ?", path);
       return { outcome: "abandoned" };
@@ -1160,13 +1192,18 @@ export class NamespaceCoordinator extends DurableObject<GatewayNamespaceEnv> {
     if (rows.length === 0) return { outcome: "unknown-lease", canonicalPath: path, binding: null, remote: null, hotOwned: false };
     const lease = rows[0];
     this.sql().exec("DELETE FROM cold_leases WHERE token = ?", input.token);
-    if (String(lease.canonical_path) !== path || String(lease.client_id) !== input.clientId || String(lease.operation_id) !== input.operationId) {
+    if (String(lease.canonical_path) !== path || String(lease.client_id) !== input.clientId || String(lease.operation_id) !== input.operationId || String(lease.operation) !== input.operation) {
       return { outcome: "unknown-lease", canonicalPath: path, binding: null, remote: null, hotOwned: false };
     }
     const expired = Number(lease.expires_at) < this.now();
     const { owned, binding } = await this.ownership(path);
     const observation = await this.observe(path, false);
     if (expired) return { outcome: "expired", canonicalPath: path, binding, remote: observation?.observation ?? null, hotOwned: owned };
+    if (!owned && binding && input.operation === "delete" && observation && !observation.observation.exists) {
+      this.setBindingState(path, "deleted");
+      const deletedBinding = { ...binding, state: "deleted" as const, updatedAt: this.now() };
+      return { outcome: "recorded", canonicalPath: path, binding: deletedBinding, remote: { ...observation.observation, deleted: true }, hotOwned: false };
+    }
     return { outcome: owned ? "raced" : "recorded", canonicalPath: path, binding, remote: observation?.observation ?? null, hotOwned: owned };
   }
 
@@ -1183,12 +1220,22 @@ export class NamespaceCoordinator extends DurableObject<GatewayNamespaceEnv> {
   }
 
   /** The client-facing question the cold executor asks before it touches a path. */
-  async pathStatus(input: { canonicalPath: string }): Promise<{ binding: PathBinding | null; remote: HotRemoteObservation | null; hotOwned: boolean }> {
+  async pathStatus(input: { canonicalPath: string }): Promise<{ binding: PathBinding | null; remote: HotRemoteObservation | null; hotOwned: boolean; room: Pick<RoomDescription, "state" | "clients" | "pendingSave" | "latestAcceptedRevision" | "latestCheckpointedRevision" | "currentContentHash"> | null }> {
     const path = canonicalVaultPath(input?.canonicalPath);
-    if (!path) return { binding: null, remote: null, hotOwned: false };
-    const { owned, binding } = await this.ownership(path);
+    if (!path) return { binding: null, remote: null, hotOwned: false, room: null };
+    const { owned, binding, description } = await this.ownership(path);
     const observation = await this.observe(path, false);
-    return { binding, remote: observation?.observation ?? null, hotOwned: owned };
+    const room = description ? {
+      state: description.state,
+      clients: description.clients,
+      pendingSave: description.pendingSave,
+      latestAcceptedRevision: description.latestAcceptedRevision,
+      latestCheckpointedRevision: description.latestCheckpointedRevision,
+      currentContentHash: description.currentContentHash,
+    } : null;
+    const remote = observation?.observation ?? null;
+    // Recycling removes the physical object. The retired namespace binding still proves deletion.
+    return { binding, remote: remote && !remote.exists && binding?.state === "deleted" ? { ...remote, deleted: true } : remote, hotOwned: owned, room };
   }
 
   /** Aggregate diagnostics: counts only, never a path. */

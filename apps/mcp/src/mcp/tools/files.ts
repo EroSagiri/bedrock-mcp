@@ -42,12 +42,12 @@ export function registerFileTools(ctx: McpRegistrationContext): void {
       }
     );
 
-    // 删除文档：默认软删除到 .trash；permanent=true 才硬删除
+    // 删除文档：默认软删除到 .mineral/versions；permanent=true 才硬删除
     registerToolCompat(ctx.server,
       "file_delete",
       {
         key: z.string().min(1),
-        permanent: z.boolean().optional().describe("默认 false，移动到 .trash；true 才永久删除"),
+        permanent: z.boolean().optional().describe("默认 false，移动到 .mineral/versions；true 才永久删除"),
         dryRun: z.boolean().optional().describe("只返回将执行的操作"),
       },
       async ({ key, permanent, dryRun }) => {
@@ -75,12 +75,12 @@ export function registerFileTools(ctx: McpRegistrationContext): void {
     );
 
 
-    // 批量删除（最多 100 个）：默认软删除到 .trash
+    // 批量删除（最多 100 个）：默认软删除到 .mineral/versions
     registerToolCompat(ctx.server,
       "file_delete_many",
       {
         keys: z.array(z.string().min(1)).min(1).max(100),
-        permanent: z.boolean().optional().describe("默认 false，移动到 .trash；true 才永久删除"),
+        permanent: z.boolean().optional().describe("默认 false，移动到 .mineral/versions；true 才永久删除"),
         dryRun: z.boolean().optional(),
       },
       async ({ keys, permanent, dryRun }) => {

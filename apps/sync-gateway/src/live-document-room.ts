@@ -13,6 +13,8 @@ import {
   type HotClientMessage,
   type HotRoomState,
   type HotServerOperation,
+  type HotMergedResolution,
+  type HotMergedResolutionResult,
 } from "@mineral/sync-core/hot-protocol";
 
 /**
@@ -177,6 +179,7 @@ export class LiveDocumentRoom extends DurableObject<GatewayHotEnv> {
         PRIMARY KEY (client_id, client_operation_id)
       );
       CREATE INDEX IF NOT EXISTS operations_revision ON operations(revision);
+      CREATE TABLE IF NOT EXISTS resolutions (operation_id TEXT PRIMARY KEY, request_hash TEXT NOT NULL, revision INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS clients (
         client_id TEXT PRIMARY KEY,
         connection_id TEXT NOT NULL DEFAULT '',
@@ -536,6 +539,67 @@ export class LiveDocumentRoom extends DurableObject<GatewayHotEnv> {
     return this.describeInternal();
   }
 
+  /** A stable view of the room, including content that has not reached R2. */
+  async resolutionSnapshot() {
+    await this.load();
+    const room = this.room;
+    if (!room || room.state === "deleted" || room.state === "quiescing") return null;
+    const content = this.markdown();
+    const identity = { documentId: room.documentId, epoch: room.epoch, revision: room.latestAcceptedRevision,
+      checkpointedRevision: room.latestCheckpointedRevision, state: room.state, expectedRemoteETag: room.expectedRemoteETag };
+    return { ...identity, content, contentHash: await hotContentHash(content) };
+  }
+
+  private checkpointTask: Promise<CheckpointReceipt | null> | null = null;
+
+  /** Persist the decision and its revision atomically; never retire a room to apply a merge. */
+  async applyMergedResolution(input: HotMergedResolution, remoteDeleted: boolean, observedRemoteETag: string | null): Promise<HotMergedResolutionResult> {
+    await this.load();
+    const requestHash = await hotContentHash(JSON.stringify({ ...input, confirmOnly: undefined }));
+    const beforeHash = await hotContentHash(this.markdown());
+    const room = this.room;
+    if (!room || room.documentId !== input.documentId || room.epoch !== input.epoch || room.canonicalPath !== input.canonicalPath || room.state === "deleted") return { outcome: "not-found" };
+    const prior = [...this.sql().exec<{ request_hash: string; revision: number }>("SELECT request_hash, revision FROM resolutions WHERE operation_id = ?", input.operationId)][0];
+    let revision: number;
+    if (prior) {
+      if (prior.request_hash !== requestHash) return { outcome: "stale" };
+      revision = Number(prior.revision);
+    } else {
+      if (input.confirmOnly) return { outcome: "stale" };
+      if (observedRemoteETag !== input.expectedRemoteETag || this.checkpointTask !== null || room.state === "quiescing" || room.latestAcceptedRevision !== input.expectedRevision || beforeHash !== input.expectedContentHash) return { outcome: "stale" };
+      const doc = this.doc!;
+      const vector = Y.encodeStateVector(doc);
+      doc.transact(() => {
+        const text = doc.getText("markdown");
+        text.delete(0, text.length);
+        text.insert(0, input.content);
+      });
+      const update = encodeHotPayload(Y.encodeStateAsUpdate(doc, vector));
+      revision = room.latestAcceptedRevision + 1;
+      room.latestAcceptedRevision = revision;
+      room.state = "active";
+      room.expectedRemoteETag = input.expectedRemoteETag;
+      room.replaceTombstoned = remoteDeleted;
+      room.pendingTarget = null;
+      room.retryAttempts = 0;
+      room.nextAttemptAt = null;
+      room.lastError = null;
+      room.dirtySince = this.now();
+      try {
+        this.ctx.storage.transactionSync(() => {
+          this.persist();
+          this.sql().exec("INSERT INTO resolutions (operation_id, request_hash, revision) VALUES (?, ?, ?)", input.operationId, requestHash, revision);
+        });
+      } catch (error) { this.reload(); throw error; }
+      this.broadcast({ protocol: HOT_PROTOCOL_VERSION, type: "operation", documentId: room.documentId, epoch: room.epoch,
+        clientId: "resolution", clientOperationId: input.operationId, parentRevision: input.expectedRevision, serverRevision: revision, update });
+      this.broadcast({ protocol: HOT_PROTOCOL_VERSION, type: "document-state", documentId: room.documentId, epoch: room.epoch, state: "active", reason: "resolved" });
+      await this.schedule(this.now());
+    }
+    if (room.latestCheckpointedRevision < revision) await this.checkpointNow();
+    return { outcome: room.latestCheckpointedRevision >= revision ? "saved" : "pending", revision };
+  }
+
   /** Marks a conflict found by the Vault or by an external observation; the pending target is kept. */
   async flagConflict(reason: string): Promise<RoomDescription | null> {
     await this.load();
@@ -727,6 +791,14 @@ export class LiveDocumentRoom extends DurableObject<GatewayHotEnv> {
    * document that produced V43 while V42 was in flight must not report V43 as saved.
    */
   private async checkpointNow(except?: WebSocket): Promise<CheckpointReceipt | null> {
+    if (this.checkpointTask) return this.checkpointTask;
+    const task = this.checkpointOnce(except);
+    this.checkpointTask = task;
+    try { return await task; }
+    finally { if (this.checkpointTask === task) this.checkpointTask = null; }
+  }
+
+  private async checkpointOnce(except?: WebSocket): Promise<CheckpointReceipt | null> {
     const room = this.room;
     if (!room) return null;
     if (room.state === "deleted" || room.state === "conflicted") return null;

@@ -5,7 +5,7 @@
 // lands in R2 under the revision the receipt names, that the server still saves after a client stops
 // asking, and that create/delete/rename move the namespace without moving the document.
 //
-// Everything it touches lives under `.mineral-sync/hot-verify/<run>/`, which is the sync layer's own
+// Everything it touches lives under `.mineral/hot-verify/<run>/`, which is the sync layer's own
 // namespace: the plugin ignores it and the index excludes it, so a verification run cannot appear in
 // anyone's vault or search results. No secrets are printed.
 //
@@ -37,7 +37,7 @@ if (typeof token !== "string" || token.length === 0 || typeof identity.endpoint 
 const channel = await deriveRemoteChangeChannel({ endpoint: identity.endpoint, bucket: identity.bucket, remotePrefix: identity.remotePrefix ?? "" });
 const auth = { Authorization: `Bearer ${token}` };
 const runId = `r${Date.now().toString(36)}`;
-const root = `.mineral-sync/hot-verify/${runId}`;
+const root = `.mineral/hot-verify/${runId}`;
 const results = [];
 
 const record = (name, ok, detail = "") => {

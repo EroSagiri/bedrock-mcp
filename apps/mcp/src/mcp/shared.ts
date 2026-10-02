@@ -3,6 +3,7 @@ import type { Env } from "../types";
 import type { VaultClient, VaultDocumentMetadata } from "../vault-client";
 import { TEXT_EXTS, isTextFile } from "@mineral/core/content";
 import { stripDocumentExtension, validateDocumentKey } from "@mineral/core/keys";
+import { versionKey } from "@mineral/sync-core/storage";
 
 export type McpRegistrationContext = {
   env: Env;
@@ -24,7 +25,7 @@ export function assertTextKey(key: string): string | null {
 }
 
 export function trashKey(key: string): string {
-  return `.trash/${new Date().toISOString().replace(/[:.]/g, "-")}/${key}`;
+  return versionKey(key);
 }
 
 export const stripTextExt = stripDocumentExtension;

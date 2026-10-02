@@ -100,6 +100,8 @@ docs/               架构文档
 
 ## 文档
 
+内部目录统一与旧数据迁移见 [docs/internal-storage.md](docs/internal-storage.md)。
+
 | 文档 | 内容 |
 |---|---|
 | [docs/mcp-surface.md](docs/mcp-surface.md) | MCP 接口全清单 + 查询架构 |

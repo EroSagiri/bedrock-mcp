@@ -6,6 +6,7 @@ import {
   isColdAuthorityRequest,
   isHotAcquireRequest,
   isHotConflictResolution,
+  isHotMergedResolution,
   isHotReleaseRequest,
   verifyHotSessionTicket,
 } from "@mineral/sync-core/hot-protocol";
@@ -67,11 +68,11 @@ export function hotAction(remainder: string): HotAction | null {
   }
 }
 
-async function readBody(request: Request): Promise<unknown> {
+async function readBody(request: Request, limit = MAX_HOT_CONTROL_BYTES): Promise<unknown> {
   const contentLength = request.headers.get("Content-Length");
-  if (contentLength && (!/^\d+$/.test(contentLength) || Number(contentLength) > MAX_HOT_CONTROL_BYTES)) return undefined;
+  if (contentLength && (!/^\d+$/.test(contentLength) || Number(contentLength) > limit)) return undefined;
   const raw = await request.text();
-  if (raw.length > MAX_HOT_CONTROL_BYTES) return undefined;
+  if (new TextEncoder().encode(raw).byteLength > limit) return undefined;
   try {
     return JSON.parse(raw) as unknown;
   } catch {
@@ -116,11 +117,11 @@ export async function handleHotRoute(
   if (action === "path") {
     if (request.method !== "GET") return json(405, { error: "method_not_allowed" });
     const path = new URL(request.url).searchParams.get("path") ?? "";
-    return json(200, await coordinator.pathStatus({ canonicalPath: path }));
+    return json(200, new URL(request.url).searchParams.get("resolution") === "1" ? await coordinator.resolutionSnapshot(path) : await coordinator.pathStatus({ canonicalPath: path }));
   }
 
   if (request.method !== "POST") return json(405, { error: "method_not_allowed" });
-  const body = await readBody(request);
+  const body = await readBody(request, action === "resolve" ? 7 * 1024 * 1024 : MAX_HOT_CONTROL_BYTES);
   if (body === undefined) return json(400, { error: "invalid_request" });
 
   if (action === "acquire") {
@@ -153,6 +154,7 @@ export async function handleHotRoute(
   }
 
   if (action === "resolve") {
+    if (isHotMergedResolution(body)) return json(200, await coordinator.applyMergedResolution(body));
     if (!isHotConflictResolution(body)) return json(400, { error: "invalid_request" });
     const resolved = await coordinator.resolveHotConflict(body);
     return json(resolved.outcome === "not-found" ? 404 : 200, resolved);

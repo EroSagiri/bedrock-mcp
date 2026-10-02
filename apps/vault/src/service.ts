@@ -1,5 +1,6 @@
 import type { VaultIndex } from "./durable/vault-index";
 import { textContentTypeForKey } from "@mineral/core/content";
+import { VERSION_NAMESPACE, versionKey } from "@mineral/sync-core/storage";
 import { createMutationRecorder, type MutationRecorder } from "./mutation/recorder";
 import { createMutationId } from "./mutation/ids";
 import type { CommittedMutationInput } from "./mutation/committed";
@@ -219,11 +220,12 @@ export function createVaultService(env: VaultEnv, options: { journal?: MutationJ
         }));        return (typeof keys === "string" ? results[0] : results) as Keys extends string ? VaultDeleteResult : VaultDeleteResult[];
       },
       async backupText(key, text, contentType, options) {
-        const backupKey = `.history/${new Date().toISOString().replace(/[:.]/g, "-")}/${key}`;
+        const backupKey = versionKey(key);
+        const original = await env.MINERAL.head(key);
         const bytes = new TextEncoder().encode(text);
         const object = await env.MINERAL.put(backupKey, bytes, {
           httpMetadata: { contentType: textContentTypeForKey(key, contentType) },
-          customMetadata: { sourceKey: key, createdAt: new Date().toISOString() },
+          customMetadata: { sourceKey: key, createdAt: new Date().toISOString(), reason: "backup", mineralOriginalMetadata: JSON.stringify(original?.customMetadata ?? {}) },
         });
         await record({ source: options?.source ?? "system", op: "put", path: backupKey, etag: object.etag, size: object.size });
         return backupKey;
@@ -232,7 +234,10 @@ export function createVaultService(env: VaultEnv, options: { journal?: MutationJ
         const source = await env.MINERAL.get(from);
         if (!source) throw new Error(`Not found: ${from}`);
         const bytes = new Uint8Array(await source.arrayBuffer());
-        const object = await env.MINERAL.put(to, bytes, { httpMetadata: source.httpMetadata, customMetadata: source.customMetadata });
+        const customMetadata = to.startsWith(VERSION_NAMESPACE)
+          ? { sourceKey: from, createdAt: new Date().toISOString(), reason: "delete", sourceETag: source.etag, mineralOriginalMetadata: JSON.stringify(source.customMetadata ?? {}) }
+          : source.customMetadata;
+        const object = await env.MINERAL.put(to, bytes, { httpMetadata: source.httpMetadata, customMetadata });
         await record({ source: options?.source ?? "mcp", op: "put", path: to, etag: object.etag, size: object.size });
         await env.MINERAL.delete(from);
         await record({ source: options?.source ?? "mcp", op: "delete", path: from });
@@ -260,4 +265,3 @@ export function createVaultService(env: VaultEnv, options: { journal?: MutationJ
     },
   };
 }
-

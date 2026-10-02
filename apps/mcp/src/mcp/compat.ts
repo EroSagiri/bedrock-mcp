@@ -60,7 +60,7 @@ const TOOL_METADATA: Record<string, {
     category: "documents",
     risk: "write",
     title: "Back up document",
-    description: "Copy one text document into the .history area.",
+    description: "Copy one text document into the .mineral/versions area.",
   },
   doc_restore: {
     category: "documents",
@@ -90,13 +90,13 @@ const TOOL_METADATA: Record<string, {
     category: "files",
     risk: "destructive",
     title: "Delete file",
-    description: "Move a file to .trash or permanently delete it.",
+    description: "Move a file to .mineral/versions or permanently delete it.",
   },
   file_delete_many: {
     category: "files",
     risk: "destructive",
     title: "Delete many files",
-    description: "Move files to .trash or permanently delete them in bulk.",
+    description: "Move files to .mineral/versions or permanently delete them in bulk.",
   },
   file_upload_binary: {
     category: "files",

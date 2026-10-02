@@ -688,3 +688,46 @@ export function conflictIdentity(parts: readonly (string | number | null | undef
 /** Re-exported so a hot-only importer does not have to reach for a second module. */
 export { canonicalVaultPath, isCanonicalVaultPath };
 
+
+
+/** A manual decision bound to all server versions displayed by the resolver. */
+export interface HotMergedResolution {
+  confirmOnly?: boolean;
+  protocol: number;
+  operationId: string;
+  canonicalPath: string;
+  documentId: DocumentId;
+  epoch: DocumentEpoch;
+  decision: "merged";
+  expectedRevision: number;
+  expectedContentHash: string;
+  expectedRemoteETag: string | null;
+  content: string;
+}
+export interface HotResolutionSnapshot {
+  expectedRemoteETag: string | null;
+  documentId: DocumentId;
+  epoch: DocumentEpoch;
+  revision: number;
+  checkpointedRevision: number;
+  contentHash: string;
+  content: string;
+  state: HotRoomState;
+  remoteETag: string | null;
+  remoteContent: string;
+}
+export interface HotMergedResolutionResult {
+  outcome: "saved" | "pending" | "stale" | "not-found";
+  revision?: number;
+}
+export function isHotMergedResolution(value: unknown): value is HotMergedResolution {
+  if (!value || typeof value !== "object") return false;
+  const v = value as Record<string, unknown>;
+  return v.protocol === HOT_PROTOCOL_VERSION && v.decision === "merged"
+    && isHotOperationId(v.operationId) && isCanonicalVaultPath(v.canonicalPath)
+    && isDocumentId(v.documentId) && isDocumentEpoch(v.epoch) && (v.epoch as number) >= 1
+    && Number.isSafeInteger(v.expectedRevision) && (v.expectedRevision as number) >= 0
+    && isHotContentHash(v.expectedContentHash)
+    && (v.expectedRemoteETag === null || typeof v.expectedRemoteETag === "string")
+    && typeof v.content === "string" && new TextEncoder().encode(v.content).byteLength <= 1024 * 1024;
+}

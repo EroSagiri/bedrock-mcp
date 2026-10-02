@@ -2,8 +2,9 @@ import { textContentTypeForKey } from "@mineral/core/content";
 import type { HotCheckpointInput, HotCheckpointResult, HotDeleteInput, HotDeleteResult, HotMoveInput, HotMoveResult, HotPathObservation } from "@mineral/core/vault-rpc";
 import { hotContentHash, type HotRemoteObservation } from "@mineral/sync-core/hot-protocol";
 import { isCanonicalVaultPath, remoteObjectKey } from "@mineral/sync-core/paths";
-import { encodeTombstone, parseTombstone, tombstoneKey, type RemoteTombstone } from "@mineral/sync-core/tombstones";
+import { encodeTombstone, parseTombstone, tombstoneKey, tombstoneReadKeys, type RemoteTombstone } from "@mineral/sync-core/tombstones";
 import { normalizeEtag } from "../mutation/ingress";
+import { VERSION_NAMESPACE } from "@mineral/sync-core/storage";
 
 /**
  * The Vault's half of the hot checkpoint contract (Phase Hot-B).
@@ -55,15 +56,17 @@ export function createHotCheckpoint(dependencies: HotCheckpointDependencies) {
 
   /** A tombstone only counts when it parses; garbage in the namespace never deletes a user object. */
   async function tombstoneFor(path: string, etag: string): Promise<RemoteTombstone | null> {
-    const key = await tombstoneKey(path, etag);
-    if (!key) return null;
-    const object = await dependencies.bucket.get(key);
-    if (!object) return null;
-    try {
-      return parseTombstone(await object.text());
-    } catch {
-      return null;
+    for (const key of await tombstoneReadKeys(path, etag)) {
+      const object = await dependencies.bucket.get(key);
+      if (!object) continue;
+      try {
+        const record = parseTombstone(await object.text());
+        if (record.path === path && record.deletedRemoteETag === etag) return record;
+      } catch {
+        // An invalid record is not deletion evidence; try the other migration location.
+      }
     }
+    return null;
   }
 
   async function observePhysical(path: string, withContent: boolean): Promise<HotPathObservation> {
@@ -112,6 +115,35 @@ export function createHotCheckpoint(dependencies: HotCheckpointDependencies) {
       onlyIf: new Headers({ "If-None-Match": "*" }),
       httpMetadata: { contentType: "application/json" },
     });
+  }
+
+  /** Namespace coordination excludes participating writers while this recovery-first removal runs. */
+  async function recycleRevision(path: string, etag: string): Promise<boolean> {
+    const key = objectKey(path);
+    if (!key) return false;
+    const source = await dependencies.bucket.get(key, { onlyIf: { etagMatches: etag } });
+    if (!source) return true;
+    if (!("body" in source)) return false;
+    const identity = (await tombstoneKey(path, etag))!.split("/").at(-1)!;
+    const destination = objectKey(`${VERSION_NAMESPACE}deleted-${identity}/${path}`)!;
+    const bytes = await source.arrayBuffer();
+    const archived = await dependencies.bucket.put(destination, bytes, {
+      onlyIf: { etagDoesNotMatch: "*" }, httpMetadata: source.httpMetadata,
+      customMetadata: { sourceKey: path, sourceETag: etag, createdAt: new Date(now()).toISOString(), reason: "delete", mineralOriginalMetadata: JSON.stringify(source.customMetadata ?? {}) },
+    });
+    if (!archived) {
+      const existing = await dependencies.bucket.get(destination);
+      if (!existing || !("body" in existing) || await existing.arrayBuffer().then(body => {
+        const left = new Uint8Array(body), right = new Uint8Array(bytes);
+        return left.length !== right.length || left.some((value, index) => value !== right[index]);
+      })) throw new Error("Recycle copy differs from retired version");
+    }
+    await writeTombstone(path, etag);
+    const current = await dependencies.bucket.head(key);
+    if (current && normalizeEtag(current.etag) !== etag) return false;
+    // The binding API has no conditional DELETE; the namespace lease is the writer barrier.
+    await dependencies.bucket.delete(key);
+    return true;
   }
 
   /** The object's own record of which commit produced it, if it has one. */
@@ -207,6 +239,9 @@ export function createHotCheckpoint(dependencies: HotCheckpointDependencies) {
       const current = observed.observation;
 
       if (input.expectedRemoteETag === null || !current.exists) {
+        if (current.deleted && current.etag && !(await recycleRevision(input.canonicalPath, current.etag))) {
+          return { status: "conflict", reason: "remote-changed", observation: (await observePhysical(input.canonicalPath, false)).observation };
+        }
         // Nothing to retire. Recording "the object is gone" is still the honest fact, and it keeps a
         // retried delete from becoming a second journal entry only if the id is the same — which it is.
         const recorded = await dependencies.record({ id: input.commitId, op: "delete", path: input.canonicalPath, ...(current.etag ? { etag: current.etag } : {}) });
@@ -215,7 +250,9 @@ export function createHotCheckpoint(dependencies: HotCheckpointDependencies) {
       if (current.etag !== normalizeEtag(input.expectedRemoteETag)) {
         return { status: "conflict", reason: "remote-changed", observation: current };
       }
-      await writeTombstone(input.canonicalPath, current.etag);
+      if (!(await recycleRevision(input.canonicalPath, current.etag))) {
+        return { status: "conflict", reason: "remote-changed", observation: (await observePhysical(input.canonicalPath, false)).observation };
+      }
       const recorded = await dependencies.record({ id: input.commitId, op: "delete", path: input.canonicalPath, etag: current.etag });
       return { status: "deleted", canonicalPath: input.canonicalPath, retiredETag: current.etag, mutationSeq: recorded.seq, mutationPending: recorded.pending, alreadyDeleted: false };
     },
@@ -244,7 +281,7 @@ export function createHotCheckpoint(dependencies: HotCheckpointDependencies) {
       const alreadyCommitted = toObservation.etag !== null ? await committedInPlace(toKey, input.commitId) : null;
       if (alreadyCommitted) {
         const retiredETag = normalizeEtag(input.expectedFromETag);
-        await writeTombstone(input.fromPath, retiredETag);
+        if (!(await recycleRevision(input.fromPath, retiredETag))) return { status: "conflict", reason: "remote-changed", observation: (await observePhysical(input.fromPath, false)).observation };
         const putRecord = await dependencies.record({ id: `${input.commitId}.to`, op: "put", path: input.toPath, etag: alreadyCommitted.etag, size: alreadyCommitted.size });
         const deleteRecord = await dependencies.record({ id: `${input.commitId}.from`, op: "delete", path: input.fromPath, etag: retiredETag });
         return {
@@ -308,7 +345,7 @@ export function createHotCheckpoint(dependencies: HotCheckpointDependencies) {
       }
 
       const putRecord = await dependencies.record({ id: `${input.commitId}.to`, op: "put", path: input.toPath, etag: targetEtag, size: targetSize });
-      await writeTombstone(input.fromPath, source.etag);
+      if (!(await recycleRevision(input.fromPath, source.etag))) return { status: "conflict", reason: "remote-changed", observation: (await observePhysical(input.fromPath, false)).observation };
       const deleteRecord = await dependencies.record({ id: `${input.commitId}.from`, op: "delete", path: input.fromPath, etag: source.etag });
 
       return {
