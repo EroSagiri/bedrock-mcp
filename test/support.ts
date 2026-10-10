@@ -8,8 +8,6 @@ import type { MutationJournal } from "../apps/vault/src/mutation/store";
 import type { MutationEvent } from "../apps/vault/src/mutation/types";
 import type { RemoteChange } from "@mineral/sync-core/sync-change";
 import type { VaultRpc } from "@mineral/core/vault-rpc";
-import type { VaultHotRpc } from "@mineral/core/vault-rpc";
-import type { CheckpointReceipt } from "@mineral/sync-core/hot-protocol";
 import { SqlMutationStore } from "../apps/vault/src/index/journal-store";
 
 /**
@@ -64,28 +62,6 @@ export function gatewayEntrypoint() {
 }
 
 /**
- * A hot document room, with the test deployment's failure seam.
- *
- * The seam lives in `test/worker/index.ts` (an R2 outage cannot be produced from outside the room), so
- * the extra method is asserted here rather than in every spec.
- */
-export function hotRoom(documentId: string) {
-  const namespace = bindings().ROOM;
-  return namespace.getByName(documentId) as unknown as DurableObjectStub & {
-    failNextCheckpoints(count: number): Promise<void>;
-    describe(): Promise<{ latestAcceptedRevision: number; latestCheckpointedRevision: number; pendingSave: boolean; state: string } | null>;
-    identity(): Promise<{ documentId: string; latestAcceptedRevision: number; latestCheckpointedRevision: number; pendingSave: boolean; state: string } | null>;
-    lastReceipt(): Promise<CheckpointReceipt | null>;
-    storageStats(): Promise<{ operations: number; snapshotRevision: number; latestAcceptedRevision: number; latestCheckpointedRevision: number; pendingTargetRevision: number | null; alarmAt: number | null } | null>;
-  };
-}
-
-/** The hot checkpoint surface, as the Gateway's room calls it. */
-export function vaultHotEntrypoint() {
-  return (exports as unknown as { VaultEntrypoint: VaultHotRpc }).VaultEntrypoint;
-}
-
-/**
  * The Vault's RPC entrypoint.
  *
  * The cast goes through `unknown` because the generated `Exports` type does not model an entrypoint
@@ -93,16 +69,6 @@ export function vaultHotEntrypoint() {
  */
 export function vaultEntrypoint(): VaultRpc {
   return (exports as unknown as { VaultEntrypoint: VaultRpc }).VaultEntrypoint;
-}
-
-export async function seedRoomAppSearch(documents: Record<string, string>, vectors = false): Promise<void> {
-  const index = vaultIndex();
-  await index.resetMutationState();
-  for (const [path, text] of Object.entries(documents)) {
-    await bindings().MINERAL.put(path, text);
-    await index.applyIndexIntent({ path, action: "upsert" });
-    if (vectors) await index.applyVectorIntent({ path, action: "upsert" });
-  }
 }
 
 /**

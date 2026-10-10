@@ -1,10 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import type { McpServer } from "@modelcontextprotocol/server";
 import { isSystemStorageKey, versionKey, versionSourcePath } from "@mineral/sync-core/storage";
-import { tombstoneKey, tombstoneReadKeys } from "@mineral/sync-core/tombstones";
 import { isIndexable } from "../apps/vault/src/index/indexable";
 import { normalizeStaticPrefix, verifyStaticAccessToken, createStaticAccessToken } from "../apps/mcp/src/auth/static-token";
-import { createHotCheckpoint } from "../apps/vault/src/hot/checkpoint";
 import { createVaultService } from "../apps/vault/src/service";
 import { registerDocumentTools } from "../apps/mcp/src/mcp/tools/documents";
 import { registerFileTools } from "../apps/mcp/src/mcp/tools/files";
@@ -14,24 +12,6 @@ import { journalFromStore } from "../apps/vault/src/mutation/store";
 import { bindings } from "./support";
 
 describe("shared internal storage", () => {
-  it("archives hot deletion before removing the source and keeps retries idempotent", async () => {
-    const bucket = bindings().MINERAL;
-    const path = "internal-storage/recycle-hot.md";
-    const source = await bucket.put(path, "recoverable", { customMetadata: { title: "original" } });
-    const checkpoint = createHotCheckpoint({ bucket, prefix: "", record: async () => ({ seq: 1, pending: false }) });
-    const input = { canonicalPath: path, documentId: "recycle", epoch: 1, commitId: "delete-1", expectedRemoteETag: source!.etag };
-    expect((await checkpoint.remove(input)).status).toBe("deleted");
-    expect(await bucket.head(path)).toBeNull();
-    const copies = (await bucket.list({ prefix: ".mineral/versions/" })).objects.filter(object => object.key.endsWith(`/${path}`));
-    expect(copies).toHaveLength(1);
-    const copy = await bucket.get(copies[0]!.key);
-    expect(await copy!.text()).toBe("recoverable");
-    expect(copy!.customMetadata?.reason).toBe("delete");
-    expect(JSON.parse(copy!.customMetadata!.mineralOriginalMetadata!)).toEqual({ title: "original" });
-    await checkpoint.remove(input);
-    expect((await bucket.list({ prefix: ".mineral/versions/" })).objects.filter(object => object.key.endsWith(`/${path}`))).toHaveLength(1);
-  });
-
   it("routes batch soft deletion into the same version store", async () => {
     const documents = createVaultService(bindings(), { journal: journalFromStore(new MemoryMutationStore()) }).documents;
     const key = "internal-storage/batch.md";
@@ -78,18 +58,6 @@ describe("shared internal storage", () => {
     const backup = await documents.backupText("internal-storage/note.md", "before");
     expect(backup.startsWith(".mineral/versions/")).toBe(true);
     expect((await documents.get(backup))?.customMetadata?.reason).toBe("backup");
-  });
-
-  it("still observes legacy deletion records before migration", async () => {
-    const bucket = bindings().MINERAL;
-    const path = "internal-storage/deleted.md";
-    const object = await bucket.put(path, "deleted content");
-    const keys = await tombstoneReadKeys(path, object!.etag);
-    expect(keys[0]).toBe(await tombstoneKey(path, object!.etag));
-    expect(keys[1].startsWith(".mineral-sync/tombstones/")).toBe(true);
-    await bucket.put(keys[1], JSON.stringify({ protocol: 1, path, deletedRemoteETag: object!.etag, createdAt: new Date().toISOString() }));
-    const checkpoint = createHotCheckpoint({ bucket, prefix: "", record: async () => ({ seq: 1, pending: false }) });
-    expect((await checkpoint.observe(path, false)).observation).toMatchObject({ exists: false, deleted: true });
   });
 
   it("restores binary versions without decoding bytes or losing user metadata", async () => {

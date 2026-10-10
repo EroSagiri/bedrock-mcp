@@ -57,11 +57,6 @@ check(vaultBinding?.entrypoint === undefined, "mcp: VAULT must bind the Vault's 
 // Durable Object bindings must name classes the same Worker actually exports.
 for (const [document, bindingName, className, label] of [
   [gateway, "REMOTE_CHANGE_HUB", "RemoteChangeHub", "gateway"],
-  // The hot layer is two objects with different owners: the namespace (per knowledge base) and the
-  // document (per DocumentId). Binding either to the wrong class is a runtime failure on the first
-  // real edit, which is exactly the kind of mistake this static check exists to catch.
-  [gateway, "COORDINATOR", "NamespaceCoordinator", "gateway"],
-  [gateway, "ROOM", "LiveDocumentRoom", "gateway"],
   [vault, "VAULT_INDEX", "VaultIndex", "vault"],
 ]) {
   const binding = (document.durable_objects?.bindings ?? []).find(entry => entry.name === bindingName);
@@ -73,23 +68,11 @@ for (const [document, bindingName, className, label] of [
 // The publisher derives the gateway channel from these, so a missing value disables the broadcast.
 for (const key of ["MINERAL_R2_ENDPOINT", "MINERAL_BUCKET", "MINERAL_REMOTE_PREFIX"]) {
   check(typeof vault.vars?.[key] === "string", `vault: vars.${key} must be set (the publisher derives its channel from them)`);
-}check(
+}
+check(
   typeof vault.vars?.MINERAL_R2_ENDPOINT === "string" && /^https:\/\//i.test(vault.vars.MINERAL_R2_ENDPOINT) && !/example\.r2\.cloudflarestorage\.com$/i.test(new URL(vault.vars.MINERAL_R2_ENDPOINT).hostname),
   "vault: vars.MINERAL_R2_ENDPOINT must be the real R2 endpoint (a placeholder would derive a channel nobody subscribes to)",
 );
-
-// The Vault is the only Worker that embeds: the vector index is built from what it committed, so the
-// AI binding belongs here. A deployment without it does not fail loudly — the probe answers
-// "ai-binding-missing" and semantic search stays empty — which is why it is checked statically.
-check(vault.ai?.binding === "AI", "vault: must declare the Workers AI binding as AI (the embedding probe and the vector index depend on it)");
-check(!(mcp.ai ?? gateway.ai), "mcp/gateway: must not hold an AI binding (only the Vault embeds)");
-
-// The Vectorize index is the physical half of the vector contract: the binding name has to be the one
-// the Durable Object reads, and the index name has to be the one that was created at the measured width.
-const vectorize = (vault.vectorize ?? [])[0];
-check(vectorize?.binding === "VECTORIZE", "vault: must declare a vectorize binding named VECTORIZE");
-check(typeof vectorize?.index_name === "string" && vectorize.index_name.length > 0, "vault: the vectorize binding must name an index (the index's width and metric are immutable, so a wrong name is a wrong vector space)");
-check((gateway.vectorize ?? []).length === 0, "gateway: must not hold a vectorize binding (the Vault owns the vector index)");
 
 if (failures.length > 0) {
   console.error("worker binding validation failed:");

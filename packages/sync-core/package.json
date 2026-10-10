@@ -38,16 +38,6 @@
       "import": "./dist/gateway-subscribe.js",
       "default": "./dist/gateway-subscribe.js"
     },
-    "./hot-protocol": {
-      "types": "./dist/hot-protocol.d.ts",
-      "import": "./dist/hot-protocol.js",
-      "default": "./dist/hot-protocol.js"
-    },
-    "./namespace-protocol": {
-      "types": "./dist/namespace-protocol.d.ts",
-      "import": "./dist/namespace-protocol.js",
-      "default": "./dist/namespace-protocol.js"
-    },
     "./tombstones": {
       "types": "./dist/tombstones.d.ts",
       "import": "./dist/tombstones.js",

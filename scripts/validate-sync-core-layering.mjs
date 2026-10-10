@@ -59,7 +59,7 @@ for (const entry of files) {
 
 const manifest = JSON.parse(readFileSync(join(packageDirectory, "package.json"), "utf8"));
 if (Object.keys(manifest.dependencies ?? {}).length > 0) failures.push(`packages/sync-core must declare no runtime dependencies (found ${Object.keys(manifest.dependencies).join(", ")})`);
-for (const subpath of ["./hot-protocol", "./namespace-protocol", "./tombstones", "./paths", "./channel", "./gateway-protocol", "./gateway-subscribe", "./sync-change"]) {
+for (const subpath of ["./tombstones", "./paths", "./channel", "./gateway-protocol", "./gateway-subscribe", "./sync-change"]) {
   if (!manifest.exports?.[subpath]) failures.push(`packages/sync-core must export ${subpath} explicitly, so a bundler can never reach an unintended file`);
 }
 
