@@ -1,5 +1,9 @@
 # 热同步实现（Phase Hot-A … Hot-E）
 
+2026-10-05：房间 App 改为 TSX 知识库工作台，唯一初始入口 `workbench.ui.md`，不保留 search 名称兼容。增加向量检索、结果集翻页、管理检查、显式索引刷新、历史和收藏。状态与 App 绑定独立存于房间持久存储，清空/损坏正文后可恢复，正常改名至其他 `.ui.md` 可保留绑定。注册/已绑定的工作台允许采用服务器投影，普通笔记原有冲突不变量保持。首次欢迎前不等待索引 RPC；插件对 `.ui.md` 的短暂 unavailable 重连继续退避，不解除 outbox/冷同步围栏。说明与验证见 `apps/room-apps/README.md`。
+
+2026-10-04：新增按文件名注册的房间附带应用，入口为 `apps/room-apps/`。Search App 使用 TextUI React 和 React Router；仅 active 且有客户端的 `search.ui.md` 房间运行。输出走既有 Yjs operation 日志、广播与 checkpoint；不增加客户端协议。旧运行标识在离开、quiesce、删除、冲突和 epoch 切换时失效。插件对新 `.ui.md` 等待 welcome 后再判断是否需要本地 seed，以免原文与服务器初始化 Screen 重复插入。应用说明与验证入口见该目录 README。
+
 2026-10-02 本地目录协议调整：新 tombstone 写入 `.mineral/tombstones/`，版本副本统一到
 `.mineral/versions/`；旧目录仅兼容读取，部署和迁移顺序见 [internal-storage.md](internal-storage.md)。
 这项目录调整尚未部署，以下历史线上验证不代表本次变更已经上线。

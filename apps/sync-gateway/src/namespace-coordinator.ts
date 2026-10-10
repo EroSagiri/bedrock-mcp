@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { roomApps } from "../../room-apps/src/registry";
 import type { HotDeleteResult, HotMoveResult, HotPathObservation, VaultHotRpc } from "@mineral/core/vault-rpc";
 import {
   HOT_PROTOCOL_VERSION,
@@ -356,7 +357,7 @@ export class NamespaceCoordinator extends DurableObject<GatewayNamespaceEnv> {
     // effectively absent but still holds a tombstoned revision is the second case, which is why the
     // room's precondition is the *physical* etag and never "nothing exists".
     if (remote.exists) {
-      if (input.local && remote.contentHash && input.local.contentHash !== remote.contentHash) {
+      if (!roomApps.match(path) && input.local && remote.contentHash && input.local.contentHash !== remote.contentHash) {
         return this.conflictResult(path, null, remote, "local-remote-mismatch");
       }
       if (observation.content === undefined || !remote.etag) return this.rejected("unavailable", path);
@@ -377,7 +378,7 @@ export class NamespaceCoordinator extends DurableObject<GatewayNamespaceEnv> {
       // id: the identity was already promised to clients, and minting a new one would invalidate every
       // baseline that mentions it.
       if (!remote.exists) return this.conflictResult(path, binding, remote, "remote-deleted");
-      if (input.local && remote.contentHash && input.local.contentHash !== remote.contentHash) return this.conflictResult(path, binding, remote, "local-remote-mismatch");
+      if (!roomApps.match(path) && input.local && remote.contentHash && input.local.contentHash !== remote.contentHash) return this.conflictResult(path, binding, remote, "local-remote-mismatch");
       if (observation.content === undefined || !remote.etag) return this.rejected("unavailable", path);
       const bootstrapped = await room.bootstrap({ documentId: binding.documentId!, epoch: binding.epoch, canonicalPath: path, channel: this.knowledgeBaseId(), seed: { content: observation.content, etag: remote.etag }, expectedRemoteETag: remote.etag, replaceTombstonedRevision: false });
       if (input.wantSession) this.claimOwnership(path, bootstrapped.documentId, bootstrapped.epoch);
@@ -410,7 +411,7 @@ export class NamespaceCoordinator extends DurableObject<GatewayNamespaceEnv> {
           return this.conflictResult(path, binding, remote, "remote-changed");
         }
         if (remote.exists) {
-          if (input.local && remote.contentHash && input.local.contentHash !== remote.contentHash) return this.conflictResult(path, binding, remote, "local-remote-mismatch");
+          if (!roomApps.match(path) && !description.roomApp && input.local && remote.contentHash && input.local.contentHash !== remote.contentHash) return this.conflictResult(path, binding, remote, "local-remote-mismatch");
           if (observation.content === undefined || !remote.etag) return this.rejected("unavailable", path);
           return this.createIncarnation(input, path, { content: observation.content, etag: remote.etag }, remote);
         }
@@ -430,7 +431,8 @@ export class NamespaceCoordinator extends DurableObject<GatewayNamespaceEnv> {
     // file — a freshly created note, or a device that never received the content — ended up in a conflict
     // it could only clear by hand.
     const hasLocalContent = Boolean(input.local && input.local.contentHash && input.local.contentHash !== emptyContentHash());
-    if (hasLocalContent && description.currentContentHash && description.baseContentHash) {
+    // A registered app is a server-owned projection; a damaged mobile copy must be adoptable.
+    if (!roomApps.match(path) && !description.roomApp && hasLocalContent && description.currentContentHash && description.baseContentHash) {
       const known = input.local!.contentHash === description.currentContentHash || input.local!.contentHash === description.baseContentHash;
       if (!known) return this.conflictResult(path, binding, remote, "local-remote-mismatch");
     }

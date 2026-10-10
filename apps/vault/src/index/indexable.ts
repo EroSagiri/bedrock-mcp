@@ -13,5 +13,6 @@ import { isSystemStorageKey } from "@mineral/sync-core/storage";
  */
 
 export function isIndexable(key: string): boolean {
-  return isTextDocumentKey(key) && !isSystemStorageKey(key);
+  // UI projections repeat retrieved passages; indexing them would feed search results back into search.
+  return isTextDocumentKey(key) && !isSystemStorageKey(key) && !key.endsWith(".ui.md");
 }

@@ -95,6 +95,16 @@ export function vaultEntrypoint(): VaultRpc {
   return (exports as unknown as { VaultEntrypoint: VaultRpc }).VaultEntrypoint;
 }
 
+export async function seedRoomAppSearch(documents: Record<string, string>, vectors = false): Promise<void> {
+  const index = vaultIndex();
+  await index.resetMutationState();
+  for (const [path, text] of Object.entries(documents)) {
+    await bindings().MINERAL.put(path, text);
+    await index.applyIndexIntent({ path, action: "upsert" });
+    if (vectors) await index.applyVectorIntent({ path, action: "upsert" });
+  }
+}
+
 /**
  * The real journal, with `recordMutation` made to fail until `heal()` is called.
  *
@@ -122,5 +132,3 @@ export function failingJournal(message = "journal unavailable") {
   };
   return { journal, heal: () => { broken = false; } };
 }
-
-

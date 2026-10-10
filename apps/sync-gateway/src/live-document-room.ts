@@ -1,5 +1,8 @@
 import { DurableObject } from "cloudflare:workers";
 import * as Y from "yjs";
+import { assertRevision, ScreenConflictError, type ScreenSnapshot, type ScreenWriteOptions } from "@mineral/textui";
+import { roomApps } from "../../room-apps/src/registry";
+import { HotScreenPort } from "../../room-apps/src/screen-port";
 import type { HotCheckpointResult, HotDeleteResult, HotMoveResult, VaultHotRpc } from "@mineral/core/vault-rpc";
 import {
   HOT_PROTOCOL_VERSION,
@@ -85,6 +88,7 @@ export type RoomDescription = {
   pendingSave: boolean;
   conflicted: boolean;
   clients: number;
+  roomApp?: string;
 };
 
 export type RoomBootstrapInput = {
@@ -118,6 +122,109 @@ export class LiveDocumentRoom extends DurableObject<GatewayHotEnv> {
   private room: RoomRow | undefined;
   /** Set when a storage failure made the in-memory doc untrustworthy; the next entry reloads it. */
   private poisoned = false;
+  private appRun: { key: string; controller: AbortController; screen: HotScreenPort } | undefined;
+  private appTail: Promise<void> = Promise.resolve();
+
+  private stopRoomApp(): void {
+    this.appRun?.controller.abort();
+    this.appRun = undefined;
+  }
+
+  private appSnapshot(): ScreenSnapshot {
+    const room = this.room!;
+    return { id: room.documentId, text: this.markdown(), revision: `${room.epoch}:${room.latestAcceptedRevision}` };
+  }
+
+  private appEligible(): boolean {
+    return this.room?.state === "active" && this.sql().exec<{ count: number }>("SELECT COUNT(*) AS count FROM clients").one().count > 0;
+  }
+
+  private async writeAppScreen(key: string, signal: AbortSignal, text: string, options: ScreenWriteOptions): Promise<ScreenSnapshot> {
+    await this.load();
+    const check = () => {
+      if (signal.aborted || this.appRun?.key !== key || !this.appEligible()) throw new Error("Room app is no longer active");
+      assertRevision(this.room!.documentId, this.appSnapshot(), options);
+    };
+    check();
+    if (text === this.markdown()) return this.appSnapshot();
+    const room = this.room!;
+    // Compute the update on a copy: a failed CAS must leave the authoritative Y.Doc untouched.
+    const copy = new Y.Doc();
+    Y.applyUpdate(copy, Y.encodeStateAsUpdate(this.doc!));
+    const vector = Y.encodeStateVector(copy);
+    copy.transact(() => {
+      const body = copy.getText("markdown");
+      const before = body.toString();
+      let start = 0;
+      while (start < before.length && start < text.length && before[start] === text[start]) start++;
+      let oldEnd = before.length, newEnd = text.length;
+      while (oldEnd > start && newEnd > start && before[oldEnd - 1] === text[newEnd - 1]) { oldEnd--; newEnd--; }
+      // UTF-16 offsets must not split a supplementary character at the retained prefix.
+      if (start > 0 && /[\uD800-\uDBFF]/.test(before[start - 1])) start--;
+      if (oldEnd < before.length && /[\uDC00-\uDFFF]/.test(before[oldEnd])) { oldEnd++; newEnd++; }
+      body.delete(start, oldEnd - start);
+      body.insert(start, text.slice(start, newEnd));
+    });
+    const frame: Extract<HotClientMessage, { type: "operation" }> = {
+      protocol: HOT_PROTOCOL_VERSION, type: "operation", documentId: room.documentId, epoch: room.epoch,
+      clientId: "mineral-room-app", clientOperationId: crypto.randomUUID(), parentRevision: room.latestAcceptedRevision,
+      update: encodeHotPayload(Y.encodeStateAsUpdate(copy, vector)),
+    };
+    copy.destroy();
+    const outcome = await this.accept(frame, check);
+    if (outcome.kind !== "accepted") throw new Error("Room app operation refused");
+    this.broadcast({ ...frame, serverRevision: outcome.revision });
+    return { id: frame.documentId, text, revision: `${frame.epoch}:${outcome.revision}` };
+  }
+
+  private runRoomApp(): Promise<void> {
+    const execute = async () => {
+      await this.load();
+      const attached = await this.ctx.storage.get<string>("room-app:name");
+      const app = this.room && (roomApps.match(this.room.canonicalPath) ??
+        (this.room.canonicalPath.endsWith(".ui.md") && attached ? roomApps.get(attached) : undefined));
+      if (!app || !this.appEligible()) { this.stopRoomApp(); return; }
+      const room = this.room!;
+      const key = `${room.documentId}:${room.epoch}:${app.name}`;
+      if (this.appRun?.key !== key) {
+        this.stopRoomApp();
+        const controller = new AbortController();
+        const screen = new HotScreenPort(room.documentId, controller.signal,
+          async () => { await this.load(); return this.appSnapshot(); },
+          (text, options) => this.writeAppScreen(key, controller.signal, text, options));
+        this.appRun = { key, controller, screen };
+      }
+      const run = this.appRun;
+      await this.ctx.storage.put("room-app:name", app.name);
+      try {
+        await app.run({ screen: run.screen, screenId: room.documentId, signal: run.controller.signal,
+          state: {
+            read: () => this.ctx.storage.get("room-app:state"),
+            write: async value => {
+              if (run.controller.signal.aborted || this.appRun !== run) return;
+              await this.ctx.storage.put("room-app:state", value);
+            },
+          },
+          index: { query: (kind, input) => {
+            const vault = this.vault();
+            if (!vault || !("queryIndex" in vault) || typeof vault.queryIndex !== "function") throw new Error("Index binding unavailable");
+            if (kind === "semantic" && "searchSemantic" in vault && typeof vault.searchSemantic === "function") return vault.searchSemantic(input) as Promise<Record<string, unknown>>;
+            if (kind === "vector-health" && "vectorHealth" in vault && typeof vault.vectorHealth === "function") return vault.vectorHealth() as Promise<Record<string, unknown>>;
+            if (kind === "refresh" && "refreshIndex" in vault && typeof vault.refreshIndex === "function") return vault.refreshIndex() as Promise<Record<string, unknown>>;
+            if (["semantic", "vector-health", "refresh"].includes(kind)) throw new Error("Workbench capability unavailable");
+            return vault.queryIndex(kind, input) as Promise<Record<string, unknown>>;
+          } } });
+      } catch (error) {
+        if (run.controller.signal.aborted) return;
+        if (error instanceof ScreenConflictError) return;
+        // Query text, paths and upstream error messages may contain private knowledge.
+        console.error(JSON.stringify({ event: "room-app-failed", app: app.name }));
+      }
+    };
+    const task = this.appTail.then(execute);
+    this.appTail = task.catch(() => {});
+    return task;
+  }
 
   constructor(ctx: DurableObjectState, env: GatewayHotEnv) {
     super(ctx, env);
@@ -198,6 +305,7 @@ export class LiveDocumentRoom extends DurableObject<GatewayHotEnv> {
   }
 
   private reload(): void {
+    this.stopRoomApp();
     this.loaded = false;
     this.doc = undefined;
     this.room = undefined;
@@ -310,6 +418,7 @@ export class LiveDocumentRoom extends DurableObject<GatewayHotEnv> {
       pendingSave: room.pendingTarget !== null || room.latestAcceptedRevision > room.latestCheckpointedRevision || room.dirtySince !== null,
       conflicted: room.state === "conflicted",
       clients: this.ctx.getWebSockets().length,
+      roomApp: room.canonicalPath.endsWith(".ui.md") ? (roomApps.match(room.canonicalPath)?.name ?? await this.ctx.storage.get<string>("room-app:name")) : undefined,
     };
   }
 
@@ -408,6 +517,7 @@ export class LiveDocumentRoom extends DurableObject<GatewayHotEnv> {
     // permanently fenced, so re-entry must return the same settled checkpoint payload.
     if (room.state === "active") {
       room.state = "quiescing";
+      this.stopRoomApp();
       this.persist();
     }
     // A room with nothing outstanding has nothing to save, and that is a success, not a failure: it
@@ -439,6 +549,7 @@ export class LiveDocumentRoom extends DurableObject<GatewayHotEnv> {
     await this.load();
     const room = this.room;
     if (!room || room.epoch !== input.expectedEpoch) return null;
+    this.stopRoomApp();
     room.epoch = input.newEpoch;
     room.canonicalPath = input.canonicalPath;
     room.expectedRemoteETag = input.etag;
@@ -467,6 +578,7 @@ export class LiveDocumentRoom extends DurableObject<GatewayHotEnv> {
       canonicalPath: room.canonicalPath,
       reason: "renamed",
     });
+    this.ctx.waitUntil(this.runRoomApp());
     return this.describeInternal();
   }
 
@@ -494,6 +606,7 @@ export class LiveDocumentRoom extends DurableObject<GatewayHotEnv> {
     const room = this.room;
     if (!room || room.epoch !== input.expectedEpoch) return false;
     room.state = "deleted";
+    this.stopRoomApp();
     room.pendingTarget = null;
     room.dirtySince = null;
     this.persist();
@@ -606,6 +719,7 @@ export class LiveDocumentRoom extends DurableObject<GatewayHotEnv> {
     const room = this.room;
     if (!room) return null;
     room.state = "conflicted";
+    this.stopRoomApp();
     room.lastError = reason.slice(0, 200);
     this.persist();
     await this.ctx.storage.deleteAlarm();
@@ -633,11 +747,12 @@ export class LiveDocumentRoom extends DurableObject<GatewayHotEnv> {
    * client that has an acknowledgement is entitled to stop caring, so an acknowledgement that precedes
    * durability would be a lie the server cannot take back.
    */
-  private async accept(frame: Extract<HotClientMessage, { type: "operation" }>): Promise<
+  private async accept(frame: Extract<HotClientMessage, { type: "operation" }>, check?: () => void): Promise<
     | { kind: "accepted"; revision: number; duplicate: boolean }
     | { kind: "rejected"; reason: "stale-epoch" | "unknown-document" | "quiescing" | "too-large" }
   > {
     await this.load();
+    check?.();
     const room = this.room;
     if (!room) return { kind: "rejected", reason: "unknown-document" };
     if (frame.epoch !== room.epoch) return { kind: "rejected", reason: "stale-epoch" };
@@ -726,6 +841,7 @@ export class LiveDocumentRoom extends DurableObject<GatewayHotEnv> {
 
   async alarm(): Promise<void> {
     await this.load();
+    await this.runRoomApp();
     const room = this.room;
     if (!room || room.state === "deleted") return;
     // The same three conditions `buildTarget` uses. Leaving `dirtySince` out of this test was a real bug:
@@ -858,6 +974,7 @@ export class LiveDocumentRoom extends DurableObject<GatewayHotEnv> {
 
     if (result.status === "conflict") {
       room.state = "conflicted";
+      this.stopRoomApp();
       room.lastError = `${result.reason}`;
       room.pendingTarget = target;
       this.persist();
@@ -986,6 +1103,8 @@ export class LiveDocumentRoom extends DurableObject<GatewayHotEnv> {
       if (existing === server || this.socketAttachment(existing).clientId !== clientId) continue;
       try { existing.close(4001, "superseded"); } catch { /* the active-connection fence still rejects it */ }
     }
+    // Initialize before welcome, so the new client receives the app screen as its authoritative seed.
+    await this.runRoomApp();
     this.send(server, {
       protocol: HOT_PROTOCOL_VERSION,
       type: "welcome",
@@ -1048,6 +1167,7 @@ export class LiveDocumentRoom extends DurableObject<GatewayHotEnv> {
         serverRevision: outcome.revision,
         duplicate: outcome.duplicate,
       });
+      this.ctx.waitUntil(this.runRoomApp());
       return;
     }
 
@@ -1082,6 +1202,7 @@ export class LiveDocumentRoom extends DurableObject<GatewayHotEnv> {
 
     if (frame.type === "leave") {
       this.sql().exec("DELETE FROM clients WHERE client_id = ? AND connection_id = ?", clientId, attachment.connectionId ?? "");
+      if (!this.appEligible()) this.stopRoomApp();
       if (frame.checkpoint) await this.checkpointNow();
       const remaining = this.ctx.getWebSockets().filter(candidate => candidate !== socket).length;
       if (remaining === 0) {
@@ -1106,6 +1227,7 @@ export class LiveDocumentRoom extends DurableObject<GatewayHotEnv> {
         attachment.connectionId ?? "",
       );
     }
+    if (!this.appEligible()) this.stopRoomApp();
     const remaining = this.ctx.getWebSockets().filter(candidate => candidate !== socket).length;
     const room = this.room;
     if (remaining === 0 && room && room.state === "active") {
@@ -1169,6 +1291,7 @@ export class LiveDocumentRoom extends DurableObject<GatewayHotEnv> {
     const room = this.room;
     if (!room || room.epoch !== input.epoch) return { outcome: "not-owner", remainingClients: 0, latestAcceptedRevision: 0, latestCheckpointedRevision: 0, receipt: null, pendingSave: false };
     this.sql().exec("DELETE FROM clients WHERE client_id = ?", input.clientId);
+    if (!this.appEligible()) this.stopRoomApp();
     for (const socket of this.ctx.getWebSockets()) {
       const attachment = socket.deserializeAttachment() as { clientId?: string } | null;
       if (attachment?.clientId === input.clientId) {

@@ -44,9 +44,9 @@ Gateway 不持有 R2 凭据 —— 它只是个中转，**验真和 Journal 都�
 ## 快速开始
 
 ```bash
-npm install
+npm run import:textui  # 导入相邻 TextUI 的已构建依赖并安装项目依赖
 npm run typecheck      # 四个 tsconfig：三个 app + test
-npm test               # 232 个测试，27 个 spec（vitest + @cloudflare/vitest-plugin）
+npm test               # vitest + @cloudflare/vitest-plugin（真实 workerd）
 npm run build          # 绑定静态校验 + 三个 Worker 的 dry-run 打包
 ```
 

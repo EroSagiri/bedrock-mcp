@@ -5,6 +5,7 @@
   "type": "module",
   "exports": "./src/index.ts",
   "dependencies": {
+    "@mineral/textui": "file:../../vendor/mineral-textui-0.0.0.tgz",
     "yjs": "^13.6.33"
   }
 }
