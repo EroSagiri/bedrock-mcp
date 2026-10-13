@@ -11,7 +11,7 @@ export function isSystemStorageKey(key: string): boolean {
 
 /** The unique component prevents two saves in the same millisecond from replacing each other. */
 export function versionKey(path: string, at = new Date(), id = crypto.randomUUID()): string {
-  return `${VERSION_NAMESPACE}${at.toISOString().replace(/[:.]/g, "-")}-${id}/${path}`;
+  return `${VERSION_NAMESPACE}${at.toISOString().replace(/[:.]/g, "-")}-${id}/content/${path}`;
 }
 
 export function versionSourcePath(key: string): string | undefined {
@@ -19,5 +19,8 @@ export function versionSourcePath(key: string): string | undefined {
   if (!prefix) return undefined;
   const remainder = key.slice(prefix.length);
   const slash = remainder.indexOf("/");
-  return slash > 0 && slash < remainder.length - 1 ? remainder.slice(slash + 1) : undefined;
+  if (slash <= 0 || slash >= remainder.length - 1) return undefined;
+  const path = remainder.slice(slash + 1);
+  if (prefix === VERSION_NAMESPACE && path === "manifest.toml") return undefined;
+  return prefix === VERSION_NAMESPACE && path.startsWith("content/") ? path.slice("content/".length) : path;
 }

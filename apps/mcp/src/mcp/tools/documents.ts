@@ -164,8 +164,8 @@ export function registerDocumentTools(ctx: McpRegistrationContext): void {
     registerToolCompat(ctx.server,
       "doc_restore",
       {
-        backupKey: z.string().min(1).describe("备份对象 key，例如 .mineral/versions/<timestamp>/path/file.md"),
-        targetKey: z.string().min(1).optional().describe("恢复目标；不传则从 backupKey 去掉 .mineral/versions/<timestamp>/ 前缀"),
+        backupKey: z.string().min(1).describe("版本正文对象 key，例如 .mineral/versions/<version-id>/content/path/file.md；不要传 manifest.toml"),
+        targetKey: z.string().min(1).optional().describe("恢复目标；不传则从版本正文 key 提取原始相对路径"),
         overwrite: z.boolean().optional().describe("目标存在时是否覆盖，默认 false"),
       },
       async ({ backupKey, targetKey, overwrite }) => {

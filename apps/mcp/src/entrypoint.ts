@@ -13,7 +13,7 @@ type DeploymentEnv = Omit<Env, "vault"> & {
 };
 
 async function createMineralMcpServer(env: Env): Promise<McpServer> {
-  const server = new McpServer({ name: "Mineral MCP", version: "0.0.2" });
+  const server = new McpServer({ name: "Mineral MCP", version: "0.0.3" });
   await registerMineralMcp({ env, server });
   return server;
 }

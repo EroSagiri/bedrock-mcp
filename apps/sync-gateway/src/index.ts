@@ -55,6 +55,7 @@ export class SyncGatewayEntrypoint extends WorkerEntrypoint<GatewayEnv> {
 export default class SyncGateway extends WorkerEntrypoint<GatewayEnv> {
   async fetch(request: Request): Promise<Response> {
     const pathname = new URL(request.url).pathname;
+    if (pathname === "/health" && request.method === "GET") return Response.json({ version: "0.0.3", role: "notification-accelerator", recoverySource: "direct-r2" }, { headers: noStore });
     const parsed = route(pathname);
     if (!parsed) return pathname.startsWith("/v1/channels/") ? error(400, "invalid_channel") : error(404, "not_found");
     if (parsed.action === "subscribe" && request.method !== "GET") return error(405, "method_not_allowed");

@@ -1,6 +1,6 @@
 {
   "name": "@mineral/sync-core",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "private": true,
   "type": "module",
   "description": "Cross-repository sync control-plane contracts, channel derivation, and generation cursors.",
@@ -47,6 +47,11 @@
       "types": "./dist/paths.d.ts",
       "import": "./dist/paths.js",
       "default": "./dist/paths.js"
+    },
+    "./recovery": {
+      "types": "./dist/recovery.d.ts",
+      "import": "./dist/recovery.js",
+      "default": "./dist/recovery.js"
     }
   },
   "scripts": {

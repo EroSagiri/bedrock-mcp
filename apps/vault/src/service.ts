@@ -1,6 +1,8 @@
 import type { VaultIndex } from "./durable/vault-index";
 import { textContentTypeForKey } from "@mineral/core/content";
-import { VERSION_NAMESPACE, versionKey } from "@mineral/sync-core/storage";
+import { VERSION_NAMESPACE, versionKey, isSystemStorageKey } from "@mineral/sync-core/storage";
+import { RecoveryStore, encodeManifest, versionKeys, type VersionManifest } from "@mineral/sync-core/recovery";
+import { r2RecoveryPort } from "./recovery-port";
 import { createMutationRecorder, type MutationRecorder } from "./mutation/recorder";
 import { createMutationId } from "./mutation/ids";
 import type { CommittedMutationInput } from "./mutation/committed";
@@ -213,7 +215,14 @@ export function createVaultService(env: VaultEnv, options: { journal?: MutationJ
         const source: MutationSource = options?.source ?? "mcp";
         // The revision is read before the delete so a repair can still describe what was removed.
         const revisions = await Promise.all(list.map(async key => (await env.MINERAL.head(key))?.etag));
-        await env.MINERAL.delete(list);
+        for (const key of list) {
+          if (key.startsWith(".mineral/") || key.startsWith(".mineral-sync/")) throw new Error("Recovery records must be cleaned as validated groups");
+          const current = await env.MINERAL.head(key);
+          if (current && !isSystemStorageKey(key)) {
+            const result = await new RecoveryStore(r2RecoveryPort(env.MINERAL), "vault").deleteFile(key, current.etag, true);
+            if (result.state !== "deleted") throw new Error(`Physical delete pending: ${result.state}`);
+          } else if (current) await env.MINERAL.delete(key);
+        }
         const results = await Promise.all(list.map(async (key, index) => {
           const recorded = await record({ source, op: "delete", path: key, ...(revisions[index] ? { etag: revisions[index]! } : {}) });
           return { key, ...(revisions[index] ? { etag: revisions[index]! } : {}), ...recorded };
@@ -221,16 +230,32 @@ export function createVaultService(env: VaultEnv, options: { journal?: MutationJ
       },
       async backupText(key, text, contentType, options) {
         const backupKey = versionKey(key);
+        const id = backupKey.slice(VERSION_NAMESPACE.length).split("/")[0];
         const original = await env.MINERAL.head(key);
         const bytes = new TextEncoder().encode(text);
-        const object = await env.MINERAL.put(backupKey, bytes, {
-          httpMetadata: { contentType: textContentTypeForKey(key, contentType) },
-          customMetadata: { sourceKey: key, createdAt: new Date().toISOString(), reason: "backup", mineralOriginalMetadata: JSON.stringify(original?.customMetadata ?? {}) },
-        });
-        await record({ source: options?.source ?? "system", op: "put", path: backupKey, etag: object.etag, size: object.size });
+        const ct = textContentTypeForKey(key, contentType);
+        const port = r2RecoveryPort(env.MINERAL);
+        const originalHttp = new Headers(); original?.writeHttpMetadata(originalHttp);
+        const body = await port.put(backupKey, bytes, null, { sourceKey: key, reason: "backup", mineralOriginalMetadata: JSON.stringify(original?.customMetadata ?? {}) }, ct);
+        const manifest: VersionManifest = { version_id: id, path: key, deleted_etag: original?.etag ?? body.etag, created_at: new Date().toISOString(), size: bytes.byteLength, content_type: ct, reason: "backup", state: "backup", content_etag: body.etag, original_modified: (original?.uploaded ?? new Date()).toISOString(), original_metadata_json: JSON.stringify(original?.customMetadata ?? {}), original_http_metadata_json: JSON.stringify({ ...Object.fromEntries(originalHttp.entries()), "content-type": ct }), anomaly: "" };
+        const keys = versionKeys(id, key);
+        const m = await port.put(keys.manifest, encodeManifest(manifest), null, {}, "application/toml");
+        await record({ source: options?.source ?? "system", op: "put", path: keys.manifest, etag: m.etag, size: m.size });
         return backupKey;
       },
       async move(from, to, options) {
+        if (to.startsWith(VERSION_NAMESPACE)) {
+          const id = to.slice(VERSION_NAMESPACE.length).split("/")[0];
+          const original = await env.MINERAL.head(from);
+          if (!original) throw new Error(`Not found: ${from}`);
+          const store = new RecoveryStore(r2RecoveryPort(env.MINERAL), "vault", () => new Date(), () => id);
+          const result = await store.deleteFile(from, original.etag, true);
+          if (result.state !== "deleted") throw new Error(`Physical delete pending: ${result.state}`);
+          const version = await env.MINERAL.head(to);
+          if (version) await record({ source: options?.source ?? "mcp", op: "put", path: to, etag: version.etag, size: version.size });
+          await record({ source: options?.source ?? "mcp", op: "delete", path: from });
+          return;
+        }
         const source = await env.MINERAL.get(from);
         if (!source) throw new Error(`Not found: ${from}`);
         const bytes = new Uint8Array(await source.arrayBuffer());
@@ -239,7 +264,8 @@ export function createVaultService(env: VaultEnv, options: { journal?: MutationJ
           : source.customMetadata;
         const object = await env.MINERAL.put(to, bytes, { httpMetadata: source.httpMetadata, customMetadata });
         await record({ source: options?.source ?? "mcp", op: "put", path: to, etag: object.etag, size: object.size });
-        await env.MINERAL.delete(from);
+        const deletion = await new RecoveryStore(r2RecoveryPort(env.MINERAL), "vault").deleteFile(from, source.etag, true);
+        if (deletion.state !== "deleted") throw new Error(`Physical delete pending: ${deletion.state}`);
         await record({ source: options?.source ?? "mcp", op: "delete", path: from });
       },
     },

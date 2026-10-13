@@ -88,7 +88,7 @@ function bindings(env: TestEnv): TestEnv {
 export default class TestWorker extends WorkerEntrypoint<TestEnv> {
   async fetch(request: Request): Promise<Response> {
     const env = bindings(this.env);
-    return new URL(request.url).pathname.startsWith("/v1/")
+    return (new URL(request.url).pathname.startsWith("/v1/") || new URL(request.url).pathname === "/health")
       ? new SyncGateway(this.ctx, env).fetch(request)
       : new VaultEntrypoint(this.ctx, env).fetch(request);
   }

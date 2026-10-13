@@ -33,6 +33,7 @@ describe("shared internal storage", () => {
     expect(versionSourcePath(".history/time/note.md")).toBe("note.md");
     expect(versionSourcePath(".trash/time/note.md")).toBe("note.md");
     expect(versionSourcePath(".mineral/versions/broken")).toBeUndefined();
+    expect(versionSourcePath(".mineral/versions/version-id/manifest.toml")).toBeUndefined();
     const issued = await createStaticAccessToken("secret", "", 600, 1000);
     for (const path of [key, ".mineral/versions/time/note.md", ".mineral/tombstones/record.json", ".mineral", ".trash/time/note.md"]) {
       expect(isSystemStorageKey(path)).toBe(true);

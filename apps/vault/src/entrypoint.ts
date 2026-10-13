@@ -234,7 +234,9 @@ export default class VaultEntrypoint extends WorkerEntrypoint<VaultWorkerEnv> {
   }
 
   async backupTextDocument(key: string, text: string, contentType?: string): Promise<string> {
-    return this.service().documents.backupText(key, text, contentType, { source: "system" });
+    const backup = await this.service().documents.backupText(key, text, contentType, { source: "system" });
+    this.runInBackground(this.drainConsumers());
+    return backup;
   }
 
   async moveDocument(from: string, to: string): Promise<void> {
