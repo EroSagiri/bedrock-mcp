@@ -1,6 +1,6 @@
 {
   "name": "@mineral/sync-core",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "private": true,
   "type": "module",
   "description": "Cross-repository sync control-plane contracts, channel derivation, and generation cursors.",

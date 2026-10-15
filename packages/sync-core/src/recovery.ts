@@ -1,6 +1,9 @@
 import { isCanonicalVaultPath } from "./paths.js";
 import { isSystemStorageKey, VERSION_NAMESPACE } from "./storage.js";
 import { encodeTombstone, parseTombstone, tombstoneKey, tombstoneReadKeys, TOMBSTONE_NAMESPACE, TOMBSTONE_READ_NAMESPACES } from "./tombstones.js";
+import { ensureDeleteTombstone, checkedAbsence, requestDeletes, type DeleteControl, type DeleteReceipt, type DeleteOutcome } from "./delete-tasks.js";
+export { DirectDeleteStore, DELETE_TASK_NAMESPACE } from "./delete-tasks.js";
+export type { DeleteControl, DeleteReceipt, DeleteOutcome } from "./delete-tasks.js";
 
 export const DELETE_RISK = "R2 不支持可靠的条件 DELETE。验证 ETag 后到 DELETE 完成前，其他设备若重建同一路径，新内容仍可能被误删。删除前版本会保留，但该窗口内的新内容可能无法找回。";
 export interface RecoveryObject { key: string; etag: string; size: number; modified: string; contentType: string; metadata: Record<string, string>; httpMetadata?: Record<string, string>; }
@@ -11,6 +14,9 @@ export interface RecoveryPort {
   put(key: string, bytes: Uint8Array, expected: string | null, metadata?: Record<string, string>, contentType?: string, httpMetadata?: Record<string, string>): Promise<RecoveryObject>;
   /** Unconditional R2 DELETE; callers validate immediately beforehand. */
   remove(key: string): Promise<void>;
+  isPreconditionFailure?(error: unknown): boolean;
+  removeMany?(keys: string[]): Promise<DeleteReceipt[]>;
+  absent?(keys: string[]): Promise<Set<string>>;
 }
 export type RecoveryState = "backup" | "delete-pending" | "deleted" | "anomaly" | "migration" | "cleanup-pending";
 export interface VersionManifest {
@@ -19,7 +25,7 @@ export interface VersionManifest {
   content_etag: string; original_modified: string; original_metadata_json: string; original_http_metadata_json: string;
   anomaly: string;
 }
-export interface RecoveryEntry { kind: "version" | "legacy-version" | "tombstone" | "invalid"; key: string; etag: string; path: string; createdAt: string; size: number; reason: string; state: string; manifest?: VersionManifest; contentType?: string; error?: string; }
+export interface RecoveryEntry { kind: "version" | "legacy-version" | "tombstone" | "invalid"; key: string; etag: string; path: string; createdAt: string; size: number; reason: string; state: string; manifest?: VersionManifest; contentType?: string; recoverable?: boolean; error?: string; }
 export interface RecoverySelection { key: string; etag: string; path: string; versionId?: string; }
 export type RecoveryIntent = { identity: string; confirmed: true } & (
   | { action: "restore"; selection: RecoverySelection; target: string; expectedTargetETag: string | null }
@@ -113,11 +119,11 @@ export class RecoveryStore {
         userPath(t.path);
         if (!(await tombstoneReadKeys(t.path, t.deletedRemoteETag)).includes(object.key)) throw new Error("Tombstone identity mismatch");
         const version = output.find(e => e.manifest?.path === t.path && e.manifest.deleted_etag === t.deletedRemoteETag);
-        let size = version?.size ?? -1; let contentType = version?.manifest?.content_type;
+        let size = version?.size ?? -1; let contentType = version?.manifest?.content_type; let recoverable = false;
         if (!version) {
-          try { const original = await this.port.head(t.path, t.deletedRemoteETag); if (original && original.etag === t.deletedRemoteETag) { size = original.size; contentType = original.contentType; } } catch { /* Metadata remains readable; a changed current file is never its deleted body. */ }
+          try { const original = await this.port.head(t.path, t.deletedRemoteETag); if (original && original.etag === t.deletedRemoteETag) { size = original.size; contentType = original.contentType; recoverable = true; } } catch { /* Metadata remains readable; a changed current file is never its deleted body. */ }
         }
-        output.push({ kind: "tombstone", key: object.key, etag: object.etag, path: t.path, createdAt: t.createdAt, size, contentType, reason: "delete", state: namespace === TOMBSTONE_NAMESPACE ? "tombstone" : "legacy-read-only" });
+        output.push({ kind: "tombstone", key: object.key, etag: object.etag, path: t.path, createdAt: t.createdAt, size, contentType, recoverable, reason: "delete", state: namespace === TOMBSTONE_NAMESPACE ? "tombstone" : "legacy-read-only" });
       } catch (error) { output.push({ kind: "invalid", key: object.key, etag: object.etag, path: object.key, createdAt: object.modified, size: object.size, reason: "delete", state: "invalid", error: String(error) }); }
     }
     return output.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
@@ -206,6 +212,7 @@ export class RecoveryStore {
     await this.port.put(s.key, encodeManifest({ ...m, state, anomaly }), s.etag, {}, "application/toml");
   }
   private async tombstone(path: string, etag: string, createdAt: string): Promise<void> {
+    if (this.port.isPreconditionFailure) return ensureDeleteTombstone(this.port, path, etag, createdAt);
     const key = await tombstoneKey(path, etag);
     if (!key) throw new Error("Invalid tombstone identity");
     const existing = await this.port.head(key);
@@ -226,7 +233,53 @@ export class RecoveryStore {
     const state = await this.finishDelete(selection, entry.manifest);
     return { state, entry };
   }
-  private async finishDelete(s: RecoverySelection, committed?: VersionManifest): Promise<RecoveryState> {
+  /** Fresh backed-up deletions share the DELETE request and absence proof, never the backups. */
+  async deleteFiles(files: { path: string; etag: string }[], control: DeleteControl = {}): Promise<DeleteOutcome[]> {
+    const outcomes: DeleteOutcome[] = [];
+    const ready: RecoveryEntry[] = [];
+    await Promise.all(files.map(async file => {
+      if (control.shouldContinue?.() === false) { outcomes.push({ path: file.path, state: "delete-pending" }); return; }
+      try {
+        const entry = await this.backup(file.path, file.etag, "delete");
+        await this.tombstone(file.path, file.etag, entry.createdAt);
+        ready.push(entry);
+      } catch (error) {
+        let changed = false;
+        try { const current = await this.port.head(file.path); changed = !!current && current.etag !== file.etag; } catch { /* Unknown. */ }
+        outcomes.push({ path: file.path, state: changed ? "conflict" : "delete-pending", error: String(error) });
+      }
+    }));
+    const verified: RecoveryEntry[] = [];
+    await Promise.all(ready.map(async entry => {
+      try {
+        const m = entry.manifest!;
+        const current = await this.port.head(m.path, m.deleted_etag);
+        if (!current) { await this.state(selectionOf(entry), m, "deleted"); outcomes.push({ path: m.path, state: "deleted" }); return; }
+        if (current.etag !== m.deleted_etag || Math.floor(Date.parse(current.modified) / 1000) !== Math.floor(Date.parse(m.original_modified) / 1000)) throw Error("Source changed before DELETE");
+        verified.push(entry);
+      } catch (error) {
+        let changed = false;
+        try {
+          const current = await this.port.head(entry.path), m = entry.manifest!;
+          changed = !!current && (current.etag !== m.deleted_etag || Math.floor(Date.parse(current.modified) / 1000) !== Math.floor(Date.parse(m.original_modified) / 1000));
+          if (changed) await this.state(selectionOf(entry), m, "anomaly", "source-recreated-before-delete");
+        } catch { /* Unknown remains pending; a proven conflict remains a conflict. */ }
+        outcomes.push({ path: entry.path, state: changed ? "conflict" : "delete-pending", error: String(error) });
+      }
+    }));
+    if (control.shouldContinue?.() === false) return [...outcomes, ...verified.map(e => ({ path: e.path, state: "delete-pending" as const }))];
+    if (!verified.length) return outcomes;
+    const receipts = await requestDeletes(this.port, verified.map(e => e.path));
+    const absent = await checkedAbsence(this.port, verified.map(e => e.path));
+    await Promise.all(verified.map(async entry => {
+      let state: DeleteOutcome["state"] = "delete-pending";
+      if (absent.has(entry.path)) try { await this.state(selectionOf(entry), entry.manifest!, "deleted"); state = "deleted"; } catch { /* Durable pending manifest remains. */ }
+      const receipt = receipts.find(r => r.key === entry.path);
+      outcomes.push({ path: entry.path, state, request: receipt?.status ?? "missing", error: receipt?.error });
+    }));
+    return outcomes;
+  }
+  private async finishDelete(s: RecoverySelection, committed?: VersionManifest, control: DeleteControl = {}): Promise<RecoveryState> {
     const m = committed ?? (await this.version(s)).m;
     if (m.reason !== "delete" || m.state !== "delete-pending") throw new Error("Not a pending delete");
     // Recreate a missing tombstone only before DELETE, never infer that its absence permits deletion.
@@ -247,22 +300,26 @@ export class RecoveryStore {
         await this.state(s, m, "anomaly", "source-recreated-before-delete"); return "anomaly";
       }
       // The acknowledged race window is recorded durably in the manifest before this call.
+      if (control.shouldContinue?.() === false) return "delete-pending";
       await this.port.remove(m.path);
       const after = await this.port.head(m.path);
       if (after) { await this.state(s, m, "anomaly", `object-present-after-delete:${after.etag}`); return "anomaly"; }
       await this.state(s, m, "deleted"); return "deleted";
     } catch { return "delete-pending"; } // No rollback. The backup and tombstone remain authoritative.
   }
-  async retryPending(): Promise<number> {
+  async retryPending(control: DeleteControl = {}): Promise<number> {
+    if (control.shouldContinue?.() === false) return 0;
     let count = 0;
     // Discovery needs manifests only, not every historical body and tombstone. The
     // selected pending version is fully revalidated by finishDelete before mutation.
     const manifests = (await this.port.list(VERSION_NAMESPACE)).filter(o => /^\.mineral\/versions\/[^/]+\/manifest\.toml$/.test(o.key));
-    for (let start = 0; start < manifests.length; start += 4) await Promise.all(manifests.slice(start, start + 4).map(async object => {
+    const width = control.concurrency ?? 4;
+    for (let start = 0; start < manifests.length && control.shouldContinue?.() !== false; start += width) await Promise.all(manifests.slice(start, start + width).map(async object => {
       try {
         const m = parseManifest((await this.port.read(object.key, object.etag)).bytes);
         if (versionKeys(m.version_id, m.path).manifest !== object.key || m.reason !== "delete" || m.state !== "delete-pending") return;
-        if (await this.finishDelete({ key: object.key, etag: object.etag, path: m.path, versionId: m.version_id }) !== "delete-pending") count++;
+        if (control.shouldContinue?.() === false) return;
+        if (await this.finishDelete({ key: object.key, etag: object.etag, path: m.path, versionId: m.version_id }, undefined, control) !== "delete-pending") count++;
       } catch { /* Preserve damaged, raced, or unavailable records; retry on a later scan. */ }
     }));
     return count;
