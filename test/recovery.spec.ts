@@ -11,6 +11,39 @@ async function setup() {
 }
 const versions = (entries: RecoveryEntry[]) => entries.filter(e => e.kind === "version");
 describe("direct R2 recovery, gateway-independent", () => {
+  it("isolates batch failures and changed ETags while retrying a lost DELETE response", async () => {
+    const port = new RecoveryMemory(); const store = new RecoveryStore(port, "batch");
+    const sources = await Promise.all(["ok.md", "unknown.md", "failed.md", "changed.md"].map(path => port.put(path, bytes, null)));
+    await port.put("changed.md", new TextEncoder().encode("new content"), sources[3].etag);
+    const remove = port.remove.bind(port), put = port.put.bind(port);
+    port.remove = async key => { await remove(key); if (key === "unknown.md") throw Error("response lost"); };
+    port.put = async (...args) => { if (args[0].includes("/content/failed.md")) throw Error("backup unavailable"); return put(...args); };
+    const results = await Promise.allSettled(sources.map(o => store.deleteFile(o.key, o.etag, true)));
+    expect(results.map(r => r.status)).toEqual(["fulfilled", "fulfilled", "rejected", "rejected"]);
+    expect(port.calls).not.toContain("DELETE failed.md"); expect(port.calls).not.toContain("DELETE changed.md");
+    expect(await port.head("failed.md")).not.toBeNull(); expect((await port.head("changed.md"))?.etag).not.toBe(sources[3].etag);
+    port.remove = remove; expect(await store.retryPending()).toBe(1);
+    expect((await store.list()).filter(e => e.kind === "version").map(e => e.state)).toEqual(["deleted", "deleted"]);
+  });
+  it("fresh deletes do not re-download committed backups; retries still verify them", async () => {
+    const { store, port } = await setup(); port.unknownDelete = true;
+    const result = await store.deleteFile("note.md", "e1", true);
+    expect(result.state).toBe("delete-pending");
+    expect(port.calls.filter(c => c.startsWith("GET .mineral/versions/"))).toEqual([]);
+    port.unknownDelete = false; await store.retryPending();
+    expect(port.calls.some(c => c.startsWith("GET .mineral/versions/") && c.includes("/content/"))).toBe(true);
+    expect((await store.list()).find(e => e.kind === "version")?.state).toBe("deleted");
+  });
+  it("retry discovery skips tombstone listings and limits manifest reads to four", async () => {
+    const { store, port } = await setup();
+    for (let i = 0; i < 13; i++) await store.backup("note.md", "e1");
+    const originalRead = port.read.bind(port), originalList = port.list.bind(port);
+    let active = 0, peak = 0; const prefixes: string[] = [];
+    port.list = async prefix => { prefixes.push(prefix); return originalList(prefix); };
+    port.read = async (key, etag) => { peak = Math.max(peak, ++active); await Promise.resolve(); try { return await originalRead(key, etag); } finally { active--; } };
+    expect(await store.retryPending()).toBe(0);
+    expect(prefixes).toEqual([".mineral/versions/"]); expect(peak).toBe(4);
+  });
   it("backs up TOML, preserves binary bytes and original metadata", async () => {
     const { store } = await setup(); const e = await store.backup("note.md", "e1");
     expect(e.key.endsWith("/manifest.toml")).toBe(true);

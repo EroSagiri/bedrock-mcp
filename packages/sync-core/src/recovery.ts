@@ -221,14 +221,16 @@ export class RecoveryStore {
     const entry = await this.backup(path, etag, "delete");
     const selection = selectionOf(entry);
     await this.tombstone(path, etag, entry.createdAt);
-    const state = await this.finishDelete(selection);
+    // Only this private continuation may reuse the just-committed backup. Public retries
+    // still re-read and validate the complete version selected by identity and ETag.
+    const state = await this.finishDelete(selection, entry.manifest);
     return { state, entry };
   }
-  private async finishDelete(s: RecoverySelection): Promise<RecoveryState> {
-    const { m } = await this.version(s);
+  private async finishDelete(s: RecoverySelection, committed?: VersionManifest): Promise<RecoveryState> {
+    const m = committed ?? (await this.version(s)).m;
     if (m.reason !== "delete" || m.state !== "delete-pending") throw new Error("Not a pending delete");
     // Recreate a missing tombstone only before DELETE, never infer that its absence permits deletion.
-    await this.tombstone(m.path, m.deleted_etag, m.created_at);
+    if (!committed) await this.tombstone(m.path, m.deleted_etag, m.created_at);
     try {
       let current: RecoveryObject | null;
       try { current = await this.port.head(m.path, m.deleted_etag); }
@@ -253,9 +255,16 @@ export class RecoveryStore {
   }
   async retryPending(): Promise<number> {
     let count = 0;
-    for (const e of await this.list()) if (e.kind === "version" && e.state === "delete-pending") {
-      if (await this.finishDelete(selectionOf(e)) !== "delete-pending") count++;
-    }
+    // Discovery needs manifests only, not every historical body and tombstone. The
+    // selected pending version is fully revalidated by finishDelete before mutation.
+    const manifests = (await this.port.list(VERSION_NAMESPACE)).filter(o => /^\.mineral\/versions\/[^/]+\/manifest\.toml$/.test(o.key));
+    for (let start = 0; start < manifests.length; start += 4) await Promise.all(manifests.slice(start, start + 4).map(async object => {
+      try {
+        const m = parseManifest((await this.port.read(object.key, object.etag)).bytes);
+        if (versionKeys(m.version_id, m.path).manifest !== object.key || m.reason !== "delete" || m.state !== "delete-pending") return;
+        if (await this.finishDelete({ key: object.key, etag: object.etag, path: m.path, versionId: m.version_id }) !== "delete-pending") count++;
+      } catch { /* Preserve damaged, raced, or unavailable records; retry on a later scan. */ }
+    }));
     return count;
   }
   async execute(intent: RecoveryIntent): Promise<void> {
